@@ -2,8 +2,8 @@ package studybetter;
 
 public class Main {
     public static void main(String[] args) {
-        boolean cli = args.length > 0 && args[0].equals("--cli");
-        System.out.println("StudyBetter starting in " + (cli ? "CLI" : "GUI") + " mode");
-        System.out.println("Gemini API key configured: " + Config.hasApiKey());
+        studybetter.domain.Course c = new studybetter.domain.Course("eecs3311", "Software Design", "F26");
+        c.addItem(new studybetter.domain.AssessmentItem("Midterm", java.time.LocalDate.of(2026, 10, 26), 20));
+        System.out.println(c + " has " + c.getItems().size() + " assessment(s)");
     }
 }
