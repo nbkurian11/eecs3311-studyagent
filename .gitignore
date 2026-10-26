@@ -1,15 +1,15 @@
-   # Local secrets
-   .env
-   .env.*
-   !.env.example
-   config.local.json
+# Local secrets
+.env
+.env.*
+!.env.example
+config.local.json
 
-   # Build / IDE
-   target/
-   .idea/
-   *.iml
-   out/
-   *.class
+# Build / IDE
+target/
+.idea/
+*.iml
+out/
+*.class
 
-   # Local app data
-   data/
+# Local app data
+data/
