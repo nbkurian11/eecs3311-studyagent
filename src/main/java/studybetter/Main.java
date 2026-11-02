@@ -2,25 +2,25 @@ package studybetter;
 
 public class Main {
     public static void main(String[] args) {
-        var manager = new studybetter.service.CourseManager();
-        for (var c : new java.util.ArrayList<>(manager.getAllCourses())) manager.deleteCourse(c.getId());
+        var courses = new studybetter.service.CourseManager();
+        for (var c : new java.util.ArrayList<>(courses.getAllCourses())) courses.deleteCourse(c.getId());
 
-        var c1 = manager.addCourse("eecs3311", "Software Design", "F26");
-        manager.addCourse("EECS3101", "Algorithms", "F26");
-        System.out.println("Courses: " + manager.getAllCourses());
+        var today = java.time.LocalDate.now();
+        var c = courses.addCourse("EECS3311", "Software Design", "F26");
+        c.addItem(new studybetter.domain.AssessmentItem("Lab 3", today.minusDays(2), 5));
+        c.addItem(new studybetter.domain.AssessmentItem("Project Stage 2", today.plusDays(8), 15));
+        c.addItem(new studybetter.domain.AssessmentItem("Quiz 2", today.plusDays(3), 5));
+        c.addItem(new studybetter.domain.AssessmentItem("Participation", null, 5));
+        studybetter.persistence.DataStore.getInstance().saveAll();
 
-        try {
-            manager.addCourse("EECS3311", "Duplicate", "F26");
-        } catch (IllegalArgumentException e) {
-            System.out.println("Rejected duplicate: " + e.getMessage());
-        }
+        var tracker = new studybetter.service.DeadlineTracker();
+        System.out.println("Upcoming:");  tracker.getUpcoming(null).forEach(d -> System.out.println("  " + d));
+        System.out.println("Due soon:");  tracker.getDueSoon().forEach(d -> System.out.println("  " + d));
+        System.out.println("Overdue:");   tracker.getOverdue().forEach(d -> System.out.println("  " + d));
+        System.out.println("No date:");   tracker.getUndated().forEach(d -> System.out.println("  " + d));
 
-        manager.editCourse(c1.getId(), "Software Design (edited)", null);
-        manager.addMaterial(c1.getId(), new studybetter.domain.Material("Week 1 slides", "notes/week1.pdf", "pdf"));
-        System.out.println("After edit: " + manager.getCourse(c1.getId())
-                + " with " + manager.getCourse(c1.getId()).getMaterials().size() + " material(s)");
-
-        manager.deleteCourse(c1.getId());
-        System.out.println("After delete: " + manager.getAllCourses());
+        var quiz = tracker.getUpcoming(null).get(0).item();
+        tracker.markComplete(quiz.getId());
+        System.out.println("After completing " + quiz.getTitle() + ": " + tracker.getUpcoming(null).size() + " upcoming");
     }
 }
