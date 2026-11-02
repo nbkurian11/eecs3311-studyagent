@@ -4,31 +4,43 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 import studybetter.domain.Course;
+import studybetter.domain.StudySession;
 
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 
 public final class DataStore {
+
+    /** Everything the app saves, written to one JSON file. */
+    private static class AppData {
+        List<Course> courses = new ArrayList<>();
+        List<StudySession> sessions = new ArrayList<>();
+    }
+
     private static DataStore instance;
 
     private final Path filePath;
     private final Gson gson;
-    private List<Course> courses = new ArrayList<>();
+    private AppData data = new AppData();
 
+    // private constructor: nobody outside can call "new DataStore()"
     private DataStore(Path filePath) {
         this.filePath = filePath;
         this.gson = new GsonBuilder()
                 .registerTypeAdapter(LocalDate.class, new LocalDateAdapter())
+                .registerTypeAdapter(LocalDateTime.class, new LocalDateTimeAdapter())
                 .setPrettyPrinting()
                 .create();
         loadAll();
     }
 
+    // the only way to get the DataStore
     public static synchronized DataStore getInstance() {
         if (instance == null) {
             instance = new DataStore(Path.of("data", "studybetter.json"));
@@ -36,31 +48,37 @@ public final class DataStore {
         return instance;
     }
 
-    public List<Course> getCourses() {
-        return courses;
-    }
+    public List<Course> getCourses() { return data.courses; }
+    public List<StudySession> getSessions() { return data.sessions; }
 
     public void saveAll() {
         try {
             Files.createDirectories(filePath.getParent());
-            Files.writeString(filePath, gson.toJson(courses));
+            Files.writeString(filePath, gson.toJson(data));
         } catch (IOException e) {
             System.err.println("Could not save data: " + e.getMessage());
         }
     }
 
     public void loadAll() {
-        if (!Files.exists(filePath)) {
-            courses = new ArrayList<>();
-            return;
-        }
+        data = new AppData();
+        if (!Files.exists(filePath)) return;
         try {
-            Type listType = new TypeToken<ArrayList<Course>>() {}.getType();
-            List<Course> loaded = gson.fromJson(Files.readString(filePath), listType);
-            courses = (loaded != null) ? loaded : new ArrayList<>();
+            String json = Files.readString(filePath).trim();
+            if (json.startsWith("[")) {
+                // old format from earlier versions: just a list of courses
+                Type listType = new TypeToken<ArrayList<Course>>() {}.getType();
+                List<Course> courses = gson.fromJson(json, listType);
+                if (courses != null) data.courses = courses;
+            } else {
+                AppData loaded = gson.fromJson(json, AppData.class);
+                if (loaded != null) data = loaded;
+            }
+            if (data.courses == null) data.courses = new ArrayList<>();
+            if (data.sessions == null) data.sessions = new ArrayList<>();
         } catch (IOException | RuntimeException e) {
             System.err.println("Could not load data, starting fresh: " + e.getMessage());
-            courses = new ArrayList<>();
+            data = new AppData();
         }
     }
 }
