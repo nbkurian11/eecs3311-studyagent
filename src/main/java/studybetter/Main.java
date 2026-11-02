@@ -5,22 +5,27 @@ public class Main {
         var courses = new studybetter.service.CourseManager();
         for (var c : new java.util.ArrayList<>(courses.getAllCourses())) courses.deleteCourse(c.getId());
 
-        var today = java.time.LocalDate.now();
         var c = courses.addCourse("EECS3311", "Software Design", "F26");
-        c.addItem(new studybetter.domain.AssessmentItem("Lab 3", today.minusDays(2), 5));
-        c.addItem(new studybetter.domain.AssessmentItem("Project Stage 2", today.plusDays(8), 15));
-        c.addItem(new studybetter.domain.AssessmentItem("Quiz 2", today.plusDays(3), 5));
-        c.addItem(new studybetter.domain.AssessmentItem("Participation", null, 5));
-        studybetter.persistence.DataStore.getInstance().saveAll();
+        var lab = new studybetter.domain.AssessmentItem("Labs", null, 20);
+        var midterm = new studybetter.domain.AssessmentItem("Midterm", null, 20);
+        c.addItem(lab);
+        c.addItem(midterm);
+        c.addItem(new studybetter.domain.AssessmentItem("Project", null, 30));
+        c.addItem(new studybetter.domain.AssessmentItem("Final", null, 30));
 
-        var tracker = new studybetter.service.DeadlineTracker();
-        System.out.println("Upcoming:");  tracker.getUpcoming(null).forEach(d -> System.out.println("  " + d));
-        System.out.println("Due soon:");  tracker.getDueSoon().forEach(d -> System.out.println("  " + d));
-        System.out.println("Overdue:");   tracker.getOverdue().forEach(d -> System.out.println("  " + d));
-        System.out.println("No date:");   tracker.getUndated().forEach(d -> System.out.println("  " + d));
+        var grades = new studybetter.service.GradeBook();
+        grades.attach(event -> System.out.println("  [observer notified: " + event + "]"));
 
-        var quiz = tracker.getUpcoming(null).get(0).item();
-        tracker.markComplete(quiz.getId());
-        System.out.println("After completing " + quiz.getTitle() + ": " + tracker.getUpcoming(null).size() + " upcoming");
+        grades.enterGrade(lab.getId(), 16, 20);       // 80%
+        grades.enterGrade(midterm.getId(), 45, 50);   // 90%
+        System.out.printf("Current grade: %.1f%%%n", grades.currentGrade(c.getId()).getAsDouble());
+        System.out.println("Target 80%: " + grades.requiredScore(c.getId(), 80));
+        System.out.println("Target 99%: " + grades.requiredScore(c.getId(), 99));
+
+        try {
+            grades.enterGrade(lab.getId(), 25, 20);
+        } catch (IllegalArgumentException e) {
+            System.out.println("Rejected: " + e.getMessage());
+        }
     }
 }
