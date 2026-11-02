@@ -64,4 +64,9 @@ public class CourseManager {
     public List<Course> getAllCourses() {
         return Collections.unmodifiableList(courses());
     }
+
+    public void addAssessment(String courseId, studybetter.domain.AssessmentItem item) {
+        getCourse(courseId).addItem(item);
+        save();
+    }
 }
