@@ -1,5 +1,5 @@
 package studybetter.persistence;
-
+import studybetter.domain.ConceptMastery;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
@@ -21,6 +21,8 @@ public final class DataStore {
     private static class AppData {
         List<Course> courses = new ArrayList<>();
         List<StudySession> sessions = new ArrayList<>();
+        List<ConceptMastery> mastery = new ArrayList<>();
+
     }
 
     private static DataStore instance;
@@ -50,6 +52,7 @@ public final class DataStore {
 
     public List<Course> getCourses() { return data.courses; }
     public List<StudySession> getSessions() { return data.sessions; }
+    public List<ConceptMastery> getMastery() { return data.mastery; }
 
     public void saveAll() {
         try {
@@ -76,6 +79,7 @@ public final class DataStore {
             }
             if (data.courses == null) data.courses = new ArrayList<>();
             if (data.sessions == null) data.sessions = new ArrayList<>();
+            if (data.mastery == null) data.mastery = new ArrayList<>();
         } catch (IOException | RuntimeException e) {
             System.err.println("Could not load data, starting fresh: " + e.getMessage());
             data = new AppData();
