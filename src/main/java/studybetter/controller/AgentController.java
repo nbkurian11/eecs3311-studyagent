@@ -1,6 +1,7 @@
 package studybetter.controller;
 
 import studybetter.Config;
+import studybetter.agent.AssessmentFactory;
 import studybetter.agent.DeadlineTool;
 import studybetter.agent.MaterialSearchTool;
 import studybetter.agent.StudyAgent;
@@ -10,6 +11,8 @@ import studybetter.domain.ConceptMastery;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
 import studybetter.domain.Material;
+import studybetter.domain.PracticeAssessment;
+import studybetter.domain.PracticeSettings;
 import studybetter.domain.StudySession;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
@@ -23,6 +26,7 @@ import studybetter.service.DeadlineTracker;
 import studybetter.service.DeadlineTracker.Deadline;
 import studybetter.service.GradeBook;
 import studybetter.service.MasteryTracker;
+import studybetter.service.PracticeManager;
 import studybetter.service.SessionLogger;
 
 import java.nio.file.Path;
@@ -34,7 +38,8 @@ import java.util.OptionalDouble;
 
 /**
  * Facade pattern: the single entry point the CLI and GUI use. It hides the services
- * (CourseManager, DeadlineTracker, GradeBook, MasteryTracker, SessionLogger) and the {@link StudyAgent},
+ * (CourseManager, DeadlineTracker, GradeBook, MasteryTracker, SessionLogger, PracticeManager) and the
+ * {@link StudyAgent},
  * and turns LLM failures into graceful results instead of crashes.
  */
 public class AgentController {
@@ -55,11 +60,17 @@ public class AgentController {
     /** What {@link #saveSyllabus} actually saved; {@code skipped} lists titles already in the course. */
     public record SyllabusSaveResult(int itemsAdded, int topicsAdded, List<String> skipped) {}
 
+    /** Result of generating practice. {@code practice} is null and {@code error} explains why when it failed. */
+    public record PracticeResult(PracticeAssessment practice, String error) {
+        public boolean created() { return practice != null; }
+    }
+
     private final CourseManager courseManager;
     private final DeadlineTracker deadlineTracker;
     private final GradeBook gradeBook;
     private final MasteryTracker masteryTracker;
     private final SessionLogger sessionLogger;
+    private final PracticeManager practiceManager = new PracticeManager();
     private final StudyAgent agent;
     private final boolean usingRealLlm;
 
@@ -222,6 +233,46 @@ public class AgentController {
 
     private static boolean hasItemTitled(Course course, String title) {
         return course.getItems().stream().anyMatch(i -> i.getTitle().equalsIgnoreCase(title));
+    }
+
+    /**
+     * F06/F07: creates a quiz or mock exam. The Simple Factory picks the class, then the build() template
+     * method selects topics and has the agent generate the questions. For weak-topic quizzes the weak topics
+     * come from MasteryTracker. Invalid settings throw; LLM failures come back in the result's error.
+     */
+    public PracticeResult createPractice(String type, PracticeSettings settings) {
+        if (settings == null) throw new IllegalArgumentException("Practice settings are required");
+        Course course = findCourse(settings.getCourseCode());
+        PracticeAssessment practice = AssessmentFactory.create(type, settings);
+        if (settings.isUseWeakTopics()) settings.setWeakTopics(getWeakTopics(course.getCode()));
+        if (!usingRealLlm) {
+            // the offline mock cannot write questions
+            return new PracticeResult(null, "no GEMINI_API_KEY in .env, running on the offline mock");
+        }
+        try {
+            practice.build(course, agent);
+        } catch (LLMException e) {
+            return new PracticeResult(null, e.getMessage());
+        }
+        return new PracticeResult(practice, null);
+    }
+
+    /** Topic names with mastery below 50% (weakest first), used for "weak topics" quizzes. */
+    public List<String> getWeakTopics(String courseCode) {
+        return masteryTracker.getWeakConcepts(findCourse(courseCode).getId()).stream()
+                .map(ConceptMastery::getTopic)
+                .toList();
+    }
+
+    /** Stores the student's answers (blank = skipped) and saves the practice so it can be graded later (F08). */
+    public void saveAnswers(PracticeAssessment practice, List<String> answers) {
+        practice.submitAnswers(answers);
+        practiceManager.save(practice);
+    }
+
+    /** The course's submitted practice tests, newest first. */
+    public List<PracticeAssessment> getPractices(String courseCode) {
+        return practiceManager.getPractices(findCourse(courseCode).getId());
     }
 
     public AssessmentItem addAssessment(String courseCode, String title, LocalDate dueDate, double weight) {

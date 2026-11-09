@@ -2,6 +2,7 @@ package studybetter.ui;
 
 import studybetter.controller.AgentController;
 import studybetter.controller.AgentController.DeadlineReport;
+import studybetter.controller.AgentController.PracticeResult;
 import studybetter.controller.AgentController.SyllabusResult;
 import studybetter.controller.AgentController.SyllabusSaveResult;
 import studybetter.controller.AgentController.UploadResult;
@@ -10,14 +11,22 @@ import studybetter.domain.ConceptMastery;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
 import studybetter.domain.Material;
+import studybetter.domain.MockExam;
+import studybetter.domain.PracticeAssessment;
+import studybetter.domain.PracticeSettings;
+import studybetter.domain.Question;
 import studybetter.domain.StudySession;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
 import studybetter.service.DeadlineTracker.Deadline;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.Scanner;
 
@@ -81,6 +90,9 @@ public class CLIApp {
             case "materials" -> materials();
             case "summarize" -> summarizePending();
             case "explain" -> explain();
+            case "quiz" -> quiz();
+            case "mock-exam" -> mockExam();
+            case "practices" -> practices();
             default -> { return false; }
         }
         return true;
@@ -107,6 +119,9 @@ public class CLIApp {
                   materials        list a course's materials and their summaries
                   summarize        retry AI summaries that are still pending
                   explain          ask the AI to explain a concept using your course materials
+                  quiz             generate a practice quiz on chosen or weak topics and answer it
+                  mock-exam        generate a timed mock exam weighted by syllabus topics and answer it
+                  practices        list your submitted quizzes and mock exams
                   quit             exit""");
     }
 
@@ -180,7 +195,7 @@ public class CLIApp {
         System.out.printf("  Total weight: %.1f%%%n", draft.totalWeight());
         System.out.println("Topics found:");
         if (draft.getTopics().isEmpty()) System.out.println("  (none)");
-        draft.getTopics().forEach(t -> System.out.println("  - " + (t.getWeek() > 0 ? t : t.getName())));
+        draft.getTopics().forEach(t -> System.out.println("  - " + t));
         if (!draft.getWarnings().isEmpty()) {
             System.out.println("Please check:");
             draft.getWarnings().forEach(w -> System.out.println("  ! " + w));
@@ -229,7 +244,7 @@ public class CLIApp {
             System.out.println(code + " has no topics. Use 'import-syllabus'.");
             return;
         }
-        list.forEach(t -> System.out.println("  " + (t.getWeek() > 0 ? t : t.getName())));
+        list.forEach(t -> System.out.println("  " + t));
     }
 
     private void deadlines() {
@@ -368,7 +383,191 @@ public class CLIApp {
         }
     }
 
+    // ---------- practice: quizzes and mock exams (agent) ----------
+
+    /** F06: pick topics (or weak topics), count and difficulty; generate; answer; save for grading. */
+    private void quiz() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        List<Topic> topics = controller.getTopics(code);
+        List<String> weak = controller.getWeakTopics(code);
+        if (!topics.isEmpty()) {
+            System.out.println("Topics in " + code + ":");
+            for (int i = 0; i < topics.size(); i++) System.out.println("  " + (i + 1) + ". " + topics.get(i));
+        }
+        System.out.println("Weak topics: " + (weak.isEmpty() ? "(none yet)" : String.join(", ", weak)));
+        String choice = required("Topics (numbers or names, comma-separated, or 'weak'): ");
+
+        PracticeSettings settings = new PracticeSettings(code);
+        if (choice.equalsIgnoreCase("weak")) {
+            settings.setUseWeakTopics(true);
+        } else {
+            settings.setTopics(parseTopicChoice(choice, topics));
+        }
+        settings.setNumQuestions(intOrDefault(prompt("Number of questions [5]: "), 5));
+        settings.setDifficulty(orDefault(prompt("Difficulty (easy/medium/hard) [medium]: "), "medium"));
+
+        System.out.println("Generating the quiz...");
+        PracticeResult result = controller.createPractice("quiz", settings);
+        if (!result.created()) {
+            System.out.println("Could not generate the quiz (" + result.error() + "). Try again later.");
+            return;
+        }
+        PracticeAssessment quiz = result.practice();
+        System.out.println("\n" + quiz.getTitle() + " (" + quiz.getQuestions().size() + " questions)");
+        quiz.getWarnings().forEach(w -> System.out.println("  ! " + w));
+        takePractice(quiz);
+    }
+
+    /** F07: pick the exam to simulate, week range, time limit; see the topic split; answer against the clock. */
+    private void mockExam() {
+        Course course = controller.findCourse(required("Course code: "));
+        String code = course.getCode();
+        if (controller.getTopics(code).isEmpty()) {
+            System.out.println(code + " has no topics yet. Use 'import-syllabus' first.");
+            return;
+        }
+        PracticeSettings settings = new PracticeSettings(code);
+        List<AssessmentItem> items = course.getItems();
+        if (!items.isEmpty()) {
+            System.out.println("Exam to simulate:");
+            for (int i = 0; i < items.size(); i++) System.out.println("  " + (i + 1) + ". " + items.get(i).getTitle());
+            String pick = prompt("Pick a number (blank for a general mock exam): ");
+            if (pick != null && !pick.isBlank()) {
+                int n = (int) parseNumber(pick);
+                if (n < 1 || n > items.size()) throw new IllegalArgumentException("Pick a number from 1 to " + items.size());
+                settings.setTargetExam(items.get(n - 1).getTitle());
+            }
+        }
+        String week = prompt("Cover topics up to week (blank for all): ");
+        if (week != null && !week.isBlank()) settings.setMaxWeek(intOrDefault(week, 0));
+        settings.setTimeLimitMinutes(intOrDefault(prompt("Time limit in minutes [60]: "), 60));
+        settings.setNumQuestions(intOrDefault(prompt("Number of questions [10]: "), 10));
+        settings.setDifficulty(orDefault(prompt("Difficulty (easy/medium/hard) [medium]: "), "medium"));
+
+        System.out.println("Generating the mock exam (this can take a minute)...");
+        PracticeResult result = controller.createPractice("mock-exam", settings);
+        if (!result.created()) {
+            System.out.println("Could not generate the mock exam (" + result.error() + "). Try again later.");
+            return;
+        }
+        MockExam exam = (MockExam) result.practice();
+        System.out.println("\n" + exam.getTitle() + ": " + exam.getQuestions().size() + " questions, "
+                + exam.getTimeLimitMinutes() + " minutes");
+        System.out.println("Questions per topic:");
+        for (Map.Entry<String, Integer> e : exam.getQuestionsPerTopic().entrySet()) {
+            System.out.println("  " + e.getKey() + ": " + e.getValue());
+        }
+        exam.getWarnings().forEach(w -> System.out.println("  ! " + w));
+        if (exam.isPartial()) {
+            String answer = prompt("Take the shorter exam with " + exam.getQuestions().size() + " questions? (y/n): ");
+            if (answer == null || !answer.equalsIgnoreCase("y")) {
+                System.out.println("Cancelled. Try 'mock-exam' again later.");
+                return;
+            }
+        }
+        prompt("Press Enter to start the timer...");
+        takePractice(exam);
+    }
+
+    /**
+     * Shows the questions one at a time and collects answers (letters for multiple choice, text for short answer;
+     * blank skips). For a timed exam, an answer typed after time runs out is not counted and the answers
+     * so far are submitted automatically. The answers are then saved for grading.
+     */
+    private void takePractice(PracticeAssessment practice) {
+        List<Question> questions = practice.getQuestions();
+        List<String> answers = new ArrayList<>();
+        for (int i = 0; i < questions.size(); i++) answers.add("");
+        Instant deadline = practice.getTimeLimitMinutes() > 0
+                ? Instant.now().plus(Duration.ofMinutes(practice.getTimeLimitMinutes())) : null;
+
+        for (int i = 0; i < questions.size(); i++) {
+            Question q = questions.get(i);
+            String kind = q.isMultipleChoice() ? "multiple choice" : "short answer";
+            String timeLeft = deadline == null ? "" : " | " + formatRemaining(deadline) + " left";
+            System.out.println("\nQ" + (i + 1) + "/" + questions.size() + " [" + q.getTopic() + ", " + kind + "]"
+                    + timeLeft);
+            System.out.println(q.getText());
+            for (int o = 0; o < q.getOptions().size(); o++) {
+                System.out.println("  " + Question.letter(o) + ") " + q.getOptions().get(o));
+            }
+            String answer = readAnswer(q);
+            if (deadline != null && Instant.now().isAfter(deadline)) {
+                System.out.println("Time is up! That answer was not counted; your earlier answers are submitted.");
+                break;
+            }
+            if (answer == null) {
+                System.out.println("\nInput ended; submitting the answers so far.");
+                break;
+            }
+            answers.set(i, answer);
+        }
+        controller.saveAnswers(practice, answers);
+        System.out.println("\nSubmitted: " + practice.getAnsweredCount() + " of " + questions.size()
+                + " questions answered. Your answers are saved for grading (see 'practices').");
+    }
+
+    /** Asks until the answer is valid. Returns "" for a skip, or null at end of input. */
+    private String readAnswer(Question q) {
+        if (!q.isMultipleChoice()) return prompt("Your answer (blank to skip): ");
+        String last = Question.letter(q.getOptions().size() - 1);
+        while (true) {
+            String answer = prompt("Your answer (A-" + last + ", blank to skip): ");
+            if (answer == null || answer.isBlank()) return answer;
+            int index = Question.indexOfLetter(answer);
+            if (index >= 0 && index < q.getOptions().size()) return answer.toUpperCase();
+            System.out.println("Please type a letter from A to " + last + ".");
+        }
+    }
+
+    private void practices() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        List<PracticeAssessment> list = controller.getPractices(code);
+        if (list.isEmpty()) {
+            System.out.println("No submitted practice for " + code + " yet. Use 'quiz' or 'mock-exam'.");
+            return;
+        }
+        for (PracticeAssessment p : list) {
+            System.out.println("  " + p.getSubmittedAt().toLocalDate() + "  " + p);
+        }
+    }
+
+    /** "1, 3" picks topics by number; anything else is taken as a topic name. */
+    private List<String> parseTopicChoice(String choice, List<Topic> topics) {
+        List<String> chosen = new ArrayList<>();
+        for (String part : choice.split(",")) {
+            String p = part.trim();
+            if (p.isEmpty()) continue;
+            if (p.matches("\\d+")) {
+                int n = Integer.parseInt(p);
+                if (n < 1 || n > topics.size()) {
+                    throw new IllegalArgumentException("Topic number must be from 1 to " + topics.size());
+                }
+                chosen.add(topics.get(n - 1).getName());
+            } else {
+                chosen.add(p);
+            }
+        }
+        return chosen;
+    }
+
+    private static String formatRemaining(Instant deadline) {
+        long seconds = Math.max(0, Duration.between(Instant.now(), deadline).getSeconds());
+        return String.format("%d:%02d", seconds / 60, seconds % 60);
+    }
+
     // ---------- input helpers ----------
+
+    private String orDefault(String text, String fallback) {
+        return text == null || text.isBlank() ? fallback : text;
+    }
+
+    private int intOrDefault(String text, int fallback) {
+        if (text == null || text.isBlank()) return fallback;
+        double value = parseNumber(text);
+        if (value != Math.floor(value)) throw new IllegalArgumentException("'" + text + "' is not a whole number");
+        return (int) value;
+    }
 
     /** Windows "Copy as path" wraps paths in quotes; remove them. */
     private String stripQuotes(String text) {

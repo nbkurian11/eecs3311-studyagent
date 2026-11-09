@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.reflect.TypeToken;
 import studybetter.domain.Course;
+import studybetter.domain.PracticeAssessment;
 import studybetter.domain.StudySession;
 
 import java.io.IOException;
@@ -22,6 +23,7 @@ public final class DataStore {
         List<Course> courses = new ArrayList<>();
         List<StudySession> sessions = new ArrayList<>();
         List<ConceptMastery> mastery = new ArrayList<>();
+        List<PracticeAssessment> practices = new ArrayList<>();
 
     }
 
@@ -37,6 +39,7 @@ public final class DataStore {
         this.gson = new GsonBuilder()
                 .registerTypeAdapter(LocalDate.class, new LocalDateAdapter())
                 .registerTypeAdapter(LocalDateTime.class, new LocalDateTimeAdapter())
+                .registerTypeAdapter(PracticeAssessment.class, new PracticeAssessmentAdapter())
                 .setPrettyPrinting()
                 .create();
         loadAll();
@@ -53,6 +56,7 @@ public final class DataStore {
     public List<Course> getCourses() { return data.courses; }
     public List<StudySession> getSessions() { return data.sessions; }
     public List<ConceptMastery> getMastery() { return data.mastery; }
+    public List<PracticeAssessment> getPractices() { return data.practices; }
 
     public void saveAll() {
         try {
@@ -80,6 +84,7 @@ public final class DataStore {
             if (data.courses == null) data.courses = new ArrayList<>();
             if (data.sessions == null) data.sessions = new ArrayList<>();
             if (data.mastery == null) data.mastery = new ArrayList<>();
+            if (data.practices == null) data.practices = new ArrayList<>();
         } catch (IOException | RuntimeException e) {
             System.err.println("Could not load data, starting fresh: " + e.getMessage());
             data = new AppData();

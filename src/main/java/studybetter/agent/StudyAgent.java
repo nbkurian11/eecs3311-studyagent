@@ -8,6 +8,8 @@ import studybetter.domain.AssessmentItem;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
 import studybetter.domain.Material;
+import studybetter.domain.Question;
+import studybetter.domain.QuestionGenerator;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
 import studybetter.llm.LLMClient;
@@ -20,8 +22,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashSet;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 
 /**
@@ -31,8 +37,9 @@ import java.util.Set;
  * Strategy pattern: depends only on the {@link LLMClient} interface, so Gemini or the mock can be plugged in.
  * Observer pattern: implements {@link DataObserver} and keeps a short memory of recent data changes
  * (grades, mastery, sessions) for later multi-step planning.
+ * Also implements {@link QuestionGenerator}, so Quiz and MockExam (Template Method) get their questions from here.
  */
-public class StudyAgent implements DataObserver {
+public class StudyAgent implements DataObserver, QuestionGenerator {
 
     /** Label used when an answer does not come from the student's own materials. */
     public static final String GENERAL_LABEL = "(General answer, not from your course materials.)";
@@ -41,11 +48,14 @@ public class StudyAgent implements DataObserver {
     private static final int MAX_SUMMARY_INPUT_CHARS = 30_000;
     private static final int MAX_SYLLABUS_INPUT_CHARS = 40_000;
     private static final int MEMORY_SIZE = 20;
+    private static final int PASSAGES_PER_TOPIC = 2;
+    private static final int MAX_QUESTION_PASSAGES = 8;
     private static final Gson GSON = new Gson();
 
     private final LLMClient llm;
     private final ToolRegistry tools;
     private final Deque<String> recentEvents = new ArrayDeque<>();
+    private final Random random = new Random();
 
     public StudyAgent(LLMClient llm, ToolRegistry tools) {
         this.llm = llm;
@@ -130,7 +140,7 @@ public class StudyAgent implements DataObserver {
                 Extract the graded assessments and the weekly topics from this course syllabus.
                 Reply with ONLY a JSON object, no explanation and no markdown, in exactly this shape:
                 {"assessments":[{"title":"Midterm","dueDate":"2026-10-20","weight":25}],
-                 "topics":[{"name":"Design patterns","week":3}]}
+                 "topics":[{"name":"Design patterns","week":3,"weight":null}]}
                 Rules:
                 - dueDate is "YYYY-MM-DD", or null if the syllabus gives no exact date. Today is %s;
                   if a date has no year, use the year that fits the current term.
@@ -138,6 +148,8 @@ public class StudyAgent implements DataObserver {
                 - List each assessment separately (e.g. "Assignment 1", "Assignment 2") when the syllabus
                   gives separate dates; otherwise one entry for the group with its total weight.
                 - week is the week number as an integer, or null if unknown.
+                - topic weight is the percent of the course or final exam the syllabus says the topic is
+                  worth, as a number, or null if the syllabus does not say (most do not; never guess).
                 - Use empty lists if there are no assessments or no topics.
 
                 Syllabus:
@@ -173,15 +185,20 @@ public class StudyAgent implements DataObserver {
     private static class RawTopic {
         String name;
         JsonElement week;
+        JsonElement weight;
     }
 
-    /** Strips ```json fences and any text around the outer braces, then parses. */
-    private static RawSyllabus parseSyllabusJson(String reply) {
+    /** Strips ```json fences and any text around the outer braces, leaving just the JSON object. */
+    private static String jsonObjectIn(String reply) {
         String json = reply == null ? "" : reply.replace("```json", "").replace("```", "").trim();
         int start = json.indexOf('{');
         int end = json.lastIndexOf('}');
         if (start < 0 || end <= start) throw new JsonParseException("no JSON object in the reply");
-        RawSyllabus raw = GSON.fromJson(json.substring(start, end + 1), RawSyllabus.class);
+        return json.substring(start, end + 1);
+    }
+
+    private static RawSyllabus parseSyllabusJson(String reply) {
+        RawSyllabus raw = GSON.fromJson(jsonObjectIn(reply), RawSyllabus.class);
         if (raw == null || (raw.assessments == null && raw.topics == null)) {
             throw new JsonParseException("JSON has no 'assessments' or 'topics'");
         }
@@ -224,7 +241,9 @@ public class StudyAgent implements DataObserver {
             if (t == null || t.name == null || t.name.isBlank()) continue;
             if (!seenTopics.add(t.name.trim().toLowerCase())) continue;
             Double week = toNumber(t.week);
-            draft.addTopic(new Topic(t.name.trim(), week == null || week < 0 ? 0 : week.intValue()));
+            Double weight = toNumber(t.weight);
+            if (weight != null && (weight <= 0 || weight > 100)) weight = null;
+            draft.addTopic(new Topic(t.name.trim(), week == null || week < 0 ? 0 : week.intValue(), weight));
         }
 
         if (draft.isEmpty()) {
@@ -253,6 +272,161 @@ public class StudyAgent implements DataObserver {
         } catch (NumberFormatException ex) {
             return null;
         }
+    }
+
+    /**
+     * F06/F07: generates practice questions, called by Quiz and MockExam during their build() template method.
+     * Step 1: retrieve a few passages per topic from the course materials (topics with none are noted and
+     * generated from the topic name only). Step 2: ask the LLM for strict JSON. Step 3: parse and validate
+     * every question, retrying once if the reply is not usable. Step 4: shuffle multiple choice options so the
+     * right answer is not always "A".
+     */
+    @Override
+    public QuestionBatch generateQuestions(Course course, Map<String, Integer> countsByTopic,
+                                           String difficulty, String purpose) {
+        if (countsByTopic == null || countsByTopic.isEmpty()) throw new IllegalArgumentException("No topics given");
+        List<String> warnings = new ArrayList<>();
+        MaterialSearchTool search = tools.get("material-search", MaterialSearchTool.class);
+        List<String> context = new ArrayList<>();
+        List<String> noMaterial = new ArrayList<>();
+        for (String topic : countsByTopic.keySet()) {
+            List<Passage> found = search.search(course.getId(), topic, PASSAGES_PER_TOPIC);
+            if (found.isEmpty()) noMaterial.add(topic);
+            for (Passage p : found) {
+                if (context.size() < MAX_QUESTION_PASSAGES) context.add("From \"" + p.materialTitle() + "\":\n" + p.text());
+            }
+        }
+        if (!noMaterial.isEmpty()) {
+            warnings.add("No course materials found for " + String.join(", ", noMaterial)
+                    + "; those questions are based on the topic name only.");
+        }
+
+        StringBuilder plan = new StringBuilder();
+        int total = 0;
+        for (Map.Entry<String, Integer> e : countsByTopic.entrySet()) {
+            plan.append("- \"").append(e.getKey()).append("\": ").append(e.getValue()).append('\n');
+            total += e.getValue();
+        }
+        String prompt = """
+                Write %d practice questions for %s in the university course %s.
+                Difficulty: %s. Questions per topic:
+                %s
+                Use mostly multiple-choice questions (4 options, exactly one correct) and about one in four
+                short-answer questions that need a 1 to 3 sentence answer.%s
+                Reply with ONLY a JSON object, no explanation and no markdown, in exactly this shape:
+                {"questions":[
+                 {"type":"mcq","topic":"<topic name>","text":"...","options":["...","...","...","..."],"answer":"B"},
+                 {"type":"short","topic":"<topic name>","text":"...","answer":"a short model answer"}]}
+                Rules:
+                - "topic" must be exactly one of the topic names listed above.
+                - For "mcq", "answer" is the letter of the correct option; do not put letters inside the options.
+                - Each question must make sense on its own (no "according to Source 1").""".formatted(
+                total, purpose, describe(course), difficulty, plan.toString().trim(),
+                context.isEmpty() ? "" : "\nBase the questions on the course material above where possible.");
+
+        List<Question> questions;
+        int[] dropped = new int[1];
+        try {
+            questions = parseQuestions(askForQuestions(prompt, context), countsByTopic, difficulty, dropped);
+        } catch (JsonParseException firstError) {
+            try {
+                dropped[0] = 0;
+                questions = parseQuestions(askForQuestions(prompt + "\n\nIMPORTANT: your previous reply was not "
+                        + "valid. Reply with the JSON object only, in the exact shape shown.", context),
+                        countsByTopic, difficulty, dropped);
+            } catch (JsonParseException secondError) {
+                throw new LLMException("The AI did not return valid questions (" + secondError.getMessage() + ")");
+            }
+        }
+        if (dropped[0] > 0) warnings.add("Skipped " + dropped[0] + " badly formed question(s) from the AI.");
+        return new QuestionBatch(questions, warnings);
+    }
+
+    private String askForQuestions(String prompt, List<String> context) {
+        return context.isEmpty() ? llm.generate(prompt) : llm.generateWithContext(prompt, context);
+    }
+
+    /** Gson target for one question in the LLM's JSON. The answer may come back as "B", "b)" or the option text. */
+    private static class RawQuestions {
+        List<RawQuestion> questions;
+    }
+
+    private static class RawQuestion {
+        String type;
+        String topic;
+        String text;
+        List<String> options;
+        String answer;
+    }
+
+    /**
+     * Turns the LLM reply into validated questions, keeping at most the requested number per topic.
+     * Throws {@link JsonParseException} when the reply has no usable question at all, so the caller retries.
+     */
+    private List<Question> parseQuestions(String reply, Map<String, Integer> countsByTopic,
+                                          String difficulty, int[] dropped) {
+        RawQuestions raw = GSON.fromJson(jsonObjectIn(reply), RawQuestions.class);
+        if (raw == null || raw.questions == null) throw new JsonParseException("JSON has no 'questions' list");
+        Map<String, Integer> remaining = new LinkedHashMap<>(countsByTopic);
+        List<Question> valid = new ArrayList<>();
+        for (RawQuestion r : raw.questions) {
+            Question q = toQuestion(r, remaining.keySet(), difficulty);
+            if (q == null) {
+                dropped[0]++;
+                continue;
+            }
+            int left = remaining.get(q.getTopic());
+            if (left == 0) continue; // more than asked for this topic
+            remaining.put(q.getTopic(), left - 1);
+            valid.add(q);
+        }
+        if (valid.isEmpty()) throw new JsonParseException("no usable questions in the reply");
+        return valid;
+    }
+
+    /** Validates one raw question; returns null if it cannot be used. */
+    private Question toQuestion(RawQuestion r, Set<String> topics, String difficulty) {
+        if (r == null || r.text == null || r.text.isBlank() || r.answer == null || r.answer.isBlank()) return null;
+        String topic = matchTopic(r.topic, topics);
+        if (topic == null) return null;
+
+        boolean mcq = r.options != null && r.options.size() >= 2 && !"short".equalsIgnoreCase(r.type);
+        if (!mcq) return new Question(r.text, List.of(), r.answer, topic, difficulty);
+
+        List<String> options = new ArrayList<>();
+        for (String o : r.options) {
+            if (o == null || o.isBlank()) return null;
+            String clean = o.trim().replaceFirst("^[A-Fa-f][).:]\\s+", "");
+            if (options.stream().anyMatch(clean::equalsIgnoreCase)) return null; // duplicate option
+            options.add(clean);
+        }
+        if (options.size() > 6) return null;
+
+        // the answer may be a letter ("B", "b)", "Option B") or the option's text
+        String a = r.answer.trim().replaceFirst("(?i)^option\\s+", "").replaceFirst("[).:]$", "");
+        int correct = Question.indexOfLetter(a);
+        if (correct < 0) {
+            for (int i = 0; i < options.size(); i++) {
+                if (options.get(i).equalsIgnoreCase(r.answer.trim())) correct = i;
+            }
+        }
+        if (correct < 0 || correct >= options.size()) return null;
+
+        String correctText = options.get(correct);
+        Collections.shuffle(options, random);
+        return new Question(r.text, options, Question.letter(options.indexOf(correctText)), topic, difficulty);
+    }
+
+    /** Finds which requested topic the LLM meant: exact name first, then one name containing the other. */
+    private static String matchTopic(String given, Set<String> topics) {
+        if (given == null || given.isBlank()) return topics.size() == 1 ? topics.iterator().next() : null;
+        String g = given.trim().toLowerCase();
+        for (String t : topics) if (t.equalsIgnoreCase(g)) return t;
+        for (String t : topics) {
+            String lower = t.toLowerCase();
+            if (lower.contains(g) || g.contains(lower)) return t;
+        }
+        return topics.size() == 1 ? topics.iterator().next() : null;
     }
 
     /** Observer callback: remembers recent changes (newest last) for later planning. */
