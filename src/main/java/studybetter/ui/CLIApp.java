@@ -2,9 +2,12 @@ package studybetter.ui;
 
 import studybetter.controller.AgentController;
 import studybetter.controller.AgentController.DeadlineReport;
+import studybetter.controller.AgentController.UploadResult;
 import studybetter.domain.AssessmentItem;
 import studybetter.domain.ConceptMastery;
 import studybetter.domain.Course;
+import studybetter.domain.Explanation;
+import studybetter.domain.Material;
 import studybetter.domain.StudySession;
 import studybetter.service.DeadlineTracker.Deadline;
 
@@ -33,6 +36,9 @@ public class CLIApp {
     /** Main loop: read a command, run it, repeat until "quit" or end of input. */
     public void run() {
         System.out.println("StudyBetter CLI. Type 'help' for commands.");
+        if (!controller.isUsingRealLlm()) {
+            System.out.println("Note: no GEMINI_API_KEY found in .env, so AI features use the offline mock.");
+        }
         controller.getActiveSession().ifPresent(s ->
                 System.out.println("Note: a study session is still running (" + s.getTopic() + ")."));
         while (true) {
@@ -65,6 +71,10 @@ public class CLIApp {
             case "start" -> startSession();
             case "end" -> endSession();
             case "mastery" -> mastery();
+            case "upload-material" -> uploadMaterial();
+            case "materials" -> materials();
+            case "summarize" -> summarizePending();
+            case "explain" -> explain();
             default -> { return false; }
         }
         return true;
@@ -73,19 +83,23 @@ public class CLIApp {
     private void help() {
         System.out.println("""
                 Commands:
-                  help           show this list
-                  courses        list your courses
-                  add-course     add a course (code, name, term)
-                  delete-course  delete a course and its assessments
-                  add-item       add an assessment to a course (title, due date, weight)
-                  deadlines      show upcoming, due-soon, overdue and undated assessments
-                  complete       mark an assessment as completed
-                  grade          enter a mark for an assessment
-                  grade-status   show current grade and the score needed for a target
-                  start          start a study session
-                  end            end the running study session
-                  mastery        show concept mastery for a course (weakest first)
-                  quit           exit""");
+                  help             show this list
+                  courses          list your courses
+                  add-course       add a course (code, name, term)
+                  delete-course    delete a course and its assessments
+                  add-item         add an assessment to a course (title, due date, weight)
+                  deadlines        show upcoming, due-soon, overdue and undated assessments
+                  complete         mark an assessment as completed
+                  grade            enter a mark for an assessment
+                  grade-status     show current grade and the score needed for a target
+                  start            start a study session
+                  end              end the running study session
+                  mastery          show concept mastery for a course (weakest first)
+                  upload-material  add a .txt/.md file to a course and get an AI summary
+                  materials        list a course's materials and their summaries
+                  summarize        retry AI summaries that are still pending
+                  explain          ask the AI to explain a concept using your course materials
+                  quit             exit""");
     }
 
     // ---------- courses ----------
@@ -209,7 +223,73 @@ public class CLIApp {
         list.forEach(m -> System.out.println("  " + m));
     }
 
+    // ---------- materials and explanations (agent) ----------
+
+    private void uploadMaterial() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        String path = stripQuotes(required("Path to .txt or .md file: "));
+        System.out.println("Reading and summarizing...");
+        UploadResult result = controller.uploadMaterial(code, path);
+        Material m = result.material();
+        System.out.println("Saved '" + m.getTitle() + "' to " + code + " (" + m.getText().length() + " characters).");
+        if (result.summarized()) {
+            System.out.println("Summary:\n" + m.getSummary());
+        } else {
+            System.out.println("AI summary is pending (" + result.summaryError() + ").");
+            System.out.println("Run 'summarize' later to try again.");
+        }
+    }
+
+    private void materials() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        List<Material> list = controller.getMaterials(code);
+        if (list.isEmpty()) {
+            System.out.println(code + " has no materials. Use 'upload-material'.");
+            return;
+        }
+        for (Material m : list) {
+            System.out.println("\n* " + m);
+            if (m.getSummary() != null && !m.isSummaryPending()) System.out.println(m.getSummary());
+        }
+    }
+
+    private void summarizePending() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        long pending = controller.getMaterials(code).stream().filter(Material::isSummaryPending).count();
+        if (pending == 0) {
+            System.out.println("No pending summaries for " + code + ".");
+            return;
+        }
+        System.out.println("Summarizing " + pending + " material(s)...");
+        for (UploadResult r : controller.retryPendingSummaries(code)) {
+            if (r.summarized()) {
+                System.out.println("Summarized '" + r.material().getTitle() + "':\n" + r.material().getSummary());
+            } else {
+                System.out.println("Still pending '" + r.material().getTitle() + "': " + r.summaryError());
+            }
+        }
+    }
+
+    private void explain() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        String question = required("What should I explain? ");
+        System.out.println("Thinking...");
+        Explanation e = controller.explainConcept(code, question);
+        System.out.println("\n" + e.getText());
+        if (!e.getSources().isEmpty()) {
+            System.out.println("\nSources: " + String.join(", ", e.getSources()));
+        }
+    }
+
     // ---------- input helpers ----------
+
+    /** Windows "Copy as path" wraps paths in quotes; remove them. */
+    private String stripQuotes(String text) {
+        if (text.length() >= 2 && text.startsWith("\"") && text.endsWith("\"")) {
+            return text.substring(1, text.length() - 1);
+        }
+        return text;
+    }
 
     /** Shows the course's assessments as a numbered list and returns the one picked, or null if none. */
     private AssessmentItem pickAssessment(Course course) {
