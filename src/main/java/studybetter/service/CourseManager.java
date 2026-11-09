@@ -4,11 +4,18 @@ import studybetter.domain.Course;
 import studybetter.domain.Material;
 import studybetter.persistence.DataStore;
 
+import java.io.IOException;
+import java.nio.charset.MalformedInputException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 
 public class CourseManager {
+
+    private static final long MAX_MATERIAL_BYTES = 2_000_000;
 
     private List<Course> courses() {
         return DataStore.getInstance().getCourses();
@@ -46,6 +53,43 @@ public class CourseManager {
 
     public void addMaterial(String courseId, Material material) {
         getCourse(courseId).addMaterial(material);
+        save();
+    }
+
+    /**
+     * Reads a .txt or .md file into a new (not yet saved) Material.
+     * PDFs are not supported yet: the student should export the text first.
+     */
+    public Material readMaterialFile(Path path) {
+        if (path == null || !Files.isRegularFile(path)) {
+            throw new IllegalArgumentException("File not found: " + path);
+        }
+        String name = path.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        String ext = dot < 0 ? "" : name.substring(dot + 1).toLowerCase();
+        if (!ext.equals("txt") && !ext.equals("md")) {
+            throw new IllegalArgumentException("Only .txt and .md files are supported (got '" + name
+                    + "'). Export PDFs or slides to text first.");
+        }
+        try {
+            if (Files.size(path) > MAX_MATERIAL_BYTES) {
+                throw new IllegalArgumentException("File is too large (limit 2 MB): " + name);
+            }
+            String text = Files.readString(path, StandardCharsets.UTF_8);
+            if (text.isBlank()) throw new IllegalArgumentException("File is empty: " + name);
+            Material material = new Material(name.substring(0, dot), path.toAbsolutePath().toString(), ext);
+            material.setText(text);
+            return material;
+        } catch (MalformedInputException e) {
+            throw new IllegalArgumentException("File is not UTF-8 text: " + name);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Could not read " + name + ": " + e.getMessage());
+        }
+    }
+
+    /** Saves a new summary for a material that is already stored. */
+    public void updateSummary(Material material, String summary) {
+        material.setSummary(summary);
         save();
     }
 
