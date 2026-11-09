@@ -155,4 +155,43 @@ src/main/java/studybetter/
 | Template Method | `PracticeAssessment.build()` with `Quiz` and `MockExam` | Same build steps (settings, topics, questions) in a fixed order; subclasses change how topics and questions are chosen. |
 | Simple Factory | `AssessmentFactory.create(type, settings)` | Creates a `Quiz` or `MockExam` from the type the user picks. |
 
+## API Key Setup
+
+StudyBetter uses Google's Gemini API for its AI features (summaries, explanations,
+syllabus import, quizzes, grading feedback and study plans). The free tier is enough
+to run the app; no credit card is needed.
+
+1. **Get a key:** go to [Google AI Studio](https://aistudio.google.com), sign in,
+   click **Get API key**, then **Create API key**, and copy it.
+
+2. **Create your local config file** in the project root by copying the example:
+
+   ```bash
+   # Windows
+   copy .env.example .env
+   # macOS / Linux
+   cp .env.example .env
+   ```
+
+3. **Add your key** by opening `.env` and replacing the placeholder:
+
+GEMINI_API_KEY=your_key_here
+GEMINI_MODEL=gemini-3.5-flash
+
+
+   If the model is busy (HTTP 503 or timeouts), try another Flash model listed in AI Studio.
+
+4. **Run the app.** It reads `.env` at startup, so restart it after any change.
+
+### Keeping your key safe
+- `.env` is listed in `.gitignore`, so it is never committed. Only `.env.example`
+  (placeholders, no real key) is in the repository.
+- Never put a real key in source code, screenshots, videos or commit messages.
+- If a key is ever pushed by accident, revoke it in AI Studio right away and create a new one.
+
+### Running without a key
+If no key is set, the app still starts and uses an offline mock: deterministic features
+(courses, deadlines, grades, sessions, mastery, dashboard) work normally, and AI
+features report that the AI service is unavailable.
+
 
