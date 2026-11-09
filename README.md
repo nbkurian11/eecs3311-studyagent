@@ -155,7 +155,4 @@ src/main/java/studybetter/
 | Template Method | `PracticeAssessment.build()` with `Quiz` and `MockExam` | Same build steps (settings, topics, questions) in a fixed order; subclasses change how topics and questions are chosen. |
 | Simple Factory | `AssessmentFactory.create(type, settings)` | Creates a `Quiz` or `MockExam` from the type the user picks. |
 
-## API keys
 
-**Never commit real API keys.** Keep your key only in `.env`, which is gitignored. `.env.example` must hold
-placeholders only. If a key is ever pushed by mistake, revoke it in Google AI Studio and create a new one.
