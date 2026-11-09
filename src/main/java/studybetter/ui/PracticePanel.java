@@ -1,6 +1,7 @@
 package studybetter.ui;
 
 import studybetter.controller.AgentController;
+import studybetter.controller.AgentController.PastTestResult;
 import studybetter.controller.AgentController.PracticeResult;
 import studybetter.domain.AssessmentItem;
 import studybetter.domain.ConceptMastery;
@@ -37,6 +38,7 @@ import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.GridLayout;
 import java.awt.Rectangle;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -46,7 +48,8 @@ import java.util.function.Supplier;
 /**
  * Practice tab (F06, F07, F08): set up a quiz or mock exam, generate it with the agent (in the background),
  * answer the questions in the window, submit for automatic grading, and see the score, feedback and updated
- * mastery. The right side lists past attempts, which can be viewed or graded later (e.g. pending short answers).
+ * mastery. The right side lists past attempts, which can be viewed or graded later (e.g. pending short answers),
+ * and analyzes a graded past test (added to mastery only after the student confirms).
  * Mock exams show a countdown and submit automatically when time runs out.
  */
 class PracticePanel extends TabPanel {
@@ -121,9 +124,10 @@ class PracticePanel extends TabPanel {
         JPanel history = new JPanel(new BorderLayout(4, 4));
         history.setBorder(BorderFactory.createTitledBorder("Past attempts"));
         history.add(new JScrollPane(historyList), BorderLayout.CENTER);
-        JPanel historyButtons = new JPanel(new GridLayout(1, 2, 4, 4));
+        JPanel historyButtons = new JPanel(new GridLayout(0, 2, 4, 4));
         historyButtons.add(button("View result", this::viewSelected));
         historyButtons.add(button("Grade selected", this::gradeSelected));
+        historyButtons.add(button("Analyze past test...", this::analyzePastTest));
         history.add(historyButtons, BorderLayout.SOUTH);
 
         JSplitPane split = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, center, history);
@@ -331,7 +335,7 @@ class PracticePanel extends TabPanel {
         practiceHeader.setText("Grading " + practice.getTitle() + "...");
         window.runInBackground("grading", () -> controller.gradePractice(practice.getId()),
                 (GradeResult result) -> {
-                    showReport(practice, result);
+                    showReport(practice.getTitle(), practice.getCourseCode(), result);
                     loadCourse();
                 });
     }
@@ -339,7 +343,7 @@ class PracticePanel extends TabPanel {
     private void viewSelected() {
         PracticeAssessment p = selectedAttempt();
         if (p.getResult() == null) throw new IllegalStateException("This attempt is not graded yet. Click 'Grade selected'.");
-        showReport(p, p.getResult());
+        showReport(p.getTitle(), p.getCourseCode(), p.getResult());
     }
 
     private void gradeSelected() {
@@ -359,7 +363,21 @@ class PracticePanel extends TabPanel {
     }
 
     /** Score, per-question feedback, per-topic breakdown and the updated mastery of those topics. */
-    private void showReport(PracticeAssessment practice, GradeResult result) {
+    private void showReport(String title, String courseCode, GradeResult result) {
+        StringBuilder sb = new StringBuilder(resultText(result));
+        List<String> topics = result.getTopicScores().stream().map(GradeResult.TopicScore::topic).toList();
+        List<ConceptMastery> mastery = controller.getMastery(courseCode).stream()
+                .filter(m -> topics.stream().anyMatch(t -> t.equalsIgnoreCase(m.getTopic())))
+                .toList();
+        if (!mastery.isEmpty()) {
+            sb.append("\nYour mastery now:\n");
+            mastery.forEach(m -> sb.append("  ").append(m).append('\n'));
+        }
+        showText(title + ": " + result, sb.toString());
+    }
+
+    /** Score, per-question verdicts, answers and feedback, per-topic breakdown and warnings. */
+    private static String resultText(GradeResult result) {
         StringBuilder sb = new StringBuilder();
         sb.append("Score: ").append(result).append("\n");
         List<GradeResult.QuestionResult> rows = result.getResults();
@@ -388,24 +406,53 @@ class PracticePanel extends TabPanel {
             }
         }
         result.getWarnings().forEach(w -> sb.append("! ").append(w).append('\n'));
-        List<String> topics = result.getTopicScores().stream().map(GradeResult.TopicScore::topic).toList();
-        List<ConceptMastery> mastery = controller.getMastery(practice.getCourseCode()).stream()
-                .filter(m -> topics.stream().anyMatch(t -> t.equalsIgnoreCase(m.getTopic())))
-                .toList();
-        if (!mastery.isEmpty()) {
-            sb.append("\nYour mastery now:\n");
-            mastery.forEach(m -> sb.append("  ").append(m).append('\n'));
-        }
+        return sb.toString();
+    }
 
-        clearPractice(practice.getTitle() + ": " + result);
+    /** Replaces the question area with a read-only report. */
+    private void showText(String header, String text) {
+        clearPractice(header);
         JTextArea report = textArea();
-        report.setText(sb.toString());
+        report.setText(text);
         report.setFont(new Font(Font.MONOSPACED, Font.PLAIN, report.getFont().getSize()));
         report.setAlignmentX(Component.LEFT_ALIGNMENT);
         questionsPanel.add(report);
         questionsPanel.revalidate();
         questionsPanel.repaint();
         report.setCaretPosition(0);
+    }
+
+    /**
+     * F08 for a graded past test: the agent extracts questions, marks and topics and explains lost marks.
+     * The result is shown for review and only added to mastery if the student confirms it is right (UC08).
+     */
+    private void analyzePastTest() {
+        String code = selectedCourse(courseBox);
+        if (current != null && !window.confirm("Leave the practice you are taking now?")) return;
+        File file = chooseTextFile("Choose a graded past test (.txt or .md) for " + code);
+        if (file == null) return;
+        stopTimer();
+        clearPractice("Analyzing " + file.getName() + "...");
+        window.runInBackground("reading the test and explaining lost marks",
+                () -> controller.analyzePastTest(code, file.getPath()),
+                (PastTestResult analysis) -> {
+                    if (!analysis.analyzed()) {
+                        clearPractice("Could not analyze the test.");
+                        window.showError(new IllegalStateException("Could not analyze the test ("
+                                + analysis.error() + "). Try again later."));
+                        return;
+                    }
+                    GradeResult result = analysis.result();
+                    String title = result.getTitle() == null ? file.getName() : result.getTitle();
+                    showText(title + ": " + result + " (review it)", resultText(result));
+                    if (window.confirm("Are these questions and marks right?\nAdd them to your mastery for "
+                            + code + "?")) {
+                        controller.recordPastTest(result);
+                        showReport(title, code, result);
+                    } else {
+                        window.setStatus("Past test not added to mastery");
+                    }
+                });
     }
 
     // ---------- timer (mock exams) ----------

@@ -17,7 +17,10 @@ import studybetter.domain.MockExam;
 import studybetter.domain.PracticeAssessment;
 import studybetter.domain.PracticeSettings;
 import studybetter.domain.Question;
+import studybetter.domain.StudyPlan;
+import studybetter.domain.StudyPriority;
 import studybetter.domain.StudySession;
+import studybetter.domain.StudyTask;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
 import studybetter.service.DeadlineTracker.Deadline;
@@ -26,8 +29,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
+import java.time.format.TextStyle;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.Scanner;
@@ -48,7 +53,7 @@ public class CLIApp {
         this.in = new Scanner(System.in);
     }
 
-    /** Main loop: read a command, run it, repeat until "quit" or end of input. */
+    /** Main loop: read a command, run it, repeat until "quit"/"exit" or end of input. */
     public void run() {
         System.out.println("StudyBetter CLI. Type 'help' for commands.");
         if (!controller.isUsingRealLlm()) {
@@ -58,7 +63,7 @@ public class CLIApp {
                 System.out.println("Note: a study session is still running (" + s.getTopic() + ")."));
         while (true) {
             String command = prompt("\n> ");
-            if (command == null || command.equalsIgnoreCase("quit")) break;
+            if (command == null || command.equalsIgnoreCase("quit") || command.equalsIgnoreCase("exit")) break;
             if (command.isEmpty()) continue;
             try {
                 if (!dispatch(command.toLowerCase())) {
@@ -97,6 +102,7 @@ public class CLIApp {
             case "practices" -> practices();
             case "grade-practice" -> gradePractice();
             case "analyze-past-test" -> analyzePastTest();
+            case "plan" -> plan();
             default -> { return false; }
         }
         return true;
@@ -128,7 +134,41 @@ public class CLIApp {
                   practices        list your submitted quizzes and mock exams with their scores
                   grade-practice   grade a submitted quiz or mock exam (or its pending short answers)
                   analyze-past-test  find where you lost marks on a graded past test (.txt) and update mastery
-                  quit             exit""");
+                  plan             build a one-week study plan from deadlines, weak topics, grades and sessions
+                  quit / exit      leave StudyBetter""");
+    }
+
+    // ---------- study plan (agent) ----------
+
+    /** F12: shows whether the last plan is outdated, asks for hours per day, builds a plan and prints it by day. */
+    private void plan() {
+        controller.getCurrentPlan().filter(StudyPlan::isOutdated).ifPresent(p ->
+                System.out.println("Your last plan is outdated (your " + p.getOutdatedBecause()
+                        + " data changed since it was made). Building a new one."));
+        double hours = parseNumber(orDefault(prompt("Hours available per day [2]: "), "2"));
+        System.out.println("Planning (checking deadlines, weak topics, grades and recent sessions)...");
+        StudyPlan plan = controller.generateStudyPlan(hours);
+
+        System.out.println("\nPriorities (most urgent first):");
+        List<StudyPriority> priorities = plan.getPriorities();
+        for (int i = 0; i < priorities.size(); i++) {
+            System.out.printf("  %d. %s  [score %.1f]%n", i + 1, priorities.get(i), priorities.get(i).score());
+        }
+        System.out.println("\nStudy plan " + plan.getStartDate() + " to " + plan.getEndDate()
+                + " (max " + plan.getMinutesPerDay() + " min/day" + (plan.isFromAi() ? ", built by the AI" : "") + "):");
+        for (LocalDate day = plan.getStartDate(); !day.isAfter(plan.getEndDate()); day = day.plusDays(1)) {
+            LocalDate d = day;
+            List<StudyTask> tasks = plan.getTasks().stream().filter(t -> t.date().equals(d)).toList();
+            System.out.println("\n" + d + " " + d.getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.ENGLISH)
+                    + " (" + plan.minutesOn(d) + " min)");
+            if (tasks.isEmpty()) System.out.println("  (free)");
+            for (StudyTask t : tasks) {
+                System.out.printf("  %3d min  %s: %s%n", t.minutes(), t.courseCode(), t.description());
+                if (!t.reason().isBlank()) System.out.println("           why: " + t.reason());
+            }
+        }
+        System.out.println("\nTotal: " + plan.getTotalMinutes() + " min this week.");
+        plan.getNotes().forEach(n -> System.out.println("  ! " + n));
     }
 
     // ---------- courses ----------

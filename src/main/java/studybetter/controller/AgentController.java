@@ -4,6 +4,7 @@ import studybetter.Config;
 import studybetter.agent.AssessmentFactory;
 import studybetter.agent.DeadlineTool;
 import studybetter.agent.MaterialSearchTool;
+import studybetter.agent.ProgressTool;
 import studybetter.agent.StudyAgent;
 import studybetter.agent.ToolRegistry;
 import studybetter.domain.AssessmentItem;
@@ -14,6 +15,7 @@ import studybetter.domain.GradeResult;
 import studybetter.domain.Material;
 import studybetter.domain.PracticeAssessment;
 import studybetter.domain.PracticeSettings;
+import studybetter.domain.StudyPlan;
 import studybetter.domain.StudySession;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
@@ -106,6 +108,7 @@ public class AgentController {
         ToolRegistry tools = new ToolRegistry();
         tools.register(new MaterialSearchTool(courseManager));
         tools.register(new DeadlineTool(deadlineTracker));
+        tools.register(new ProgressTool(courseManager, gradeBook, masteryTracker, sessionLogger));
         this.agent = new StudyAgent(llm, tools);
         addObserver(agent);
         this.dashboard = new ProgressDashboard(courseManager, deadlineTracker, gradeBook, masteryTracker, sessionLogger);
@@ -385,6 +388,19 @@ public class AgentController {
 
     public boolean sessionNeedsConfirmation(StudySession s) {
         return sessionLogger.needsConfirmation(s);
+    }
+
+    /**
+     * F12: has the agent build a one-week study plan within {@code hoursPerDay}. With the offline mock or when the
+     * LLM fails, the plan is the deterministic fallback (sorted by deadline x weight) and its notes say so.
+     */
+    public StudyPlan generateStudyPlan(double hoursPerDay) {
+        return agent.buildStudyPlan(hoursPerDay, usingRealLlm);
+    }
+
+    /** The last study plan built in this run (check {@link StudyPlan#isOutdated()}), if any. */
+    public Optional<StudyPlan> getCurrentPlan() {
+        return Optional.ofNullable(agent.getCurrentPlan());
     }
 
     public int totalStudyMinutes(String courseCode) {

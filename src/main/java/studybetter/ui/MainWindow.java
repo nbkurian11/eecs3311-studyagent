@@ -47,6 +47,7 @@ public class MainWindow extends JFrame {
         tabs.addTab("Practice", new PracticePanel(controller, this));
         tabs.addTab("Mastery", new MasteryPanel(controller, this));
         tabs.addTab("Sessions", new SessionsPanel(controller, this));
+        tabs.addTab("Planner", new PlannerPanel(controller, this));
         tabs.addTab("Dashboard", new DashboardPanel(controller, this));
         // reload a tab every time it is opened, so it shows changes made in other tabs
         tabs.addChangeListener(e -> refreshSelectedTab());

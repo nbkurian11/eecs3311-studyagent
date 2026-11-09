@@ -7,16 +7,19 @@ import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JTable;
 import javax.swing.JTextArea;
+import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Component;
 import java.awt.FlowLayout;
 import java.awt.GridLayout;
 import java.awt.event.ActionListener;
+import java.io.File;
 import java.util.List;
 import java.util.Objects;
 
@@ -29,6 +32,8 @@ abstract class TabPanel extends JPanel {
 
     protected final AgentController controller;
     protected final MainWindow window;
+    /** Folder of the last chosen file, shared by all tabs. */
+    private static File lastFolder;
 
     protected TabPanel(AgentController controller, MainWindow window) {
         super(new BorderLayout(8, 8));
@@ -86,6 +91,16 @@ abstract class TabPanel extends JPanel {
         t.setRowHeight(22);
         t.getTableHeader().setReorderingAllowed(false);
         return t;
+    }
+
+    /** Lets the student pick a .txt or .md file; returns null if they cancel. */
+    protected File chooseTextFile(String title) {
+        JFileChooser chooser = new JFileChooser(lastFolder);
+        chooser.setDialogTitle(title);
+        chooser.setFileFilter(new FileNameExtensionFilter("Text or Markdown (*.txt, *.md)", "txt", "md"));
+        if (chooser.showOpenDialog(window) != JFileChooser.APPROVE_OPTION) return null;
+        lastFolder = chooser.getCurrentDirectory();
+        return chooser.getSelectedFile();
     }
 
     // ---------- small layout helpers shared by the tabs ----------

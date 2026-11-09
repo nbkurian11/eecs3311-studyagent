@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonParseException;
 import studybetter.agent.MaterialSearchTool.Passage;
+import studybetter.agent.ProgressTool.CourseProgress;
 import studybetter.domain.AssessmentItem;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
@@ -12,14 +13,19 @@ import studybetter.domain.Material;
 import studybetter.domain.PracticeAssessment;
 import studybetter.domain.Question;
 import studybetter.domain.QuestionGenerator;
+import studybetter.domain.StudyPlan;
+import studybetter.domain.StudyPriority;
+import studybetter.domain.StudyTask;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
 import studybetter.llm.LLMClient;
 import studybetter.llm.LLMException;
 import studybetter.observer.DataObserver;
+import studybetter.service.DeadlineTracker.Deadline;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
+import java.time.format.TextStyle;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -28,6 +34,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -38,8 +45,9 @@ import java.util.function.Function;
  * (retrieval over course materials, deadlines) and then asks the LLM, instead of just forwarding prompts.
  * <p>
  * Strategy pattern: depends only on the {@link LLMClient} interface, so Gemini or the mock can be plugged in.
- * Observer pattern: implements {@link DataObserver} and keeps a short memory of recent data changes
- * (grades, mastery, sessions) for later multi-step planning.
+ * Observer pattern: implements {@link DataObserver}, keeps a short memory of recent data changes
+ * (grades, mastery, sessions, deadlines) that it mentions when planning, and marks the current study plan
+ * outdated when that data changes.
  * Also implements {@link QuestionGenerator}, so Quiz and MockExam (Template Method) get their questions from here.
  */
 public class StudyAgent implements DataObserver, QuestionGenerator {
@@ -59,6 +67,8 @@ public class StudyAgent implements DataObserver, QuestionGenerator {
     private final ToolRegistry tools;
     private final Deque<String> recentEvents = new ArrayDeque<>();
     private final Random random = new Random();
+    /** The last plan built by {@link #buildStudyPlan}; marked outdated by {@link #onDataChanged}. */
+    private volatile StudyPlan currentPlan;
 
     public StudyAgent(LLMClient llm, ToolRegistry tools) {
         this.llm = llm;
@@ -768,11 +778,179 @@ public class StudyAgent implements DataObserver, QuestionGenerator {
         }
     }
 
-    /** Observer callback: remembers recent changes (newest last) for later planning. */
+    // ---------- F12: study plan ----------
+
+    public static final int PLAN_DAYS = 7;
+
+    /**
+     * F12: builds a one-week study plan with a multi-step agent loop.
+     * Step 1 (tools): upcoming deadlines and weights from DeadlineTool; current grades, weak concepts and recent
+     * study minutes from ProgressTool. Step 2 (reasoning): rank priorities by urgency x weight, boosted by weak
+     * topics, low grades and little recent study ({@link PlanScheduler#rank}). Step 3 (LLM): ask for a strict JSON
+     * schedule, validate every task and retry once on a bad reply. Step 4: trim any day that goes over the hours
+     * available. If the LLM is unavailable ({@code useLlm} false) or fails, a deterministic plan sorted by
+     * deadline x weight is built instead and the plan says so.
+     */
+    public StudyPlan buildStudyPlan(double hoursPerDay, boolean useLlm) {
+        if (hoursPerDay < 0.5 || hoursPerDay > 12) {
+            throw new IllegalArgumentException("Hours per day must be between 0.5 and 12");
+        }
+        int minutesPerDay = (int) Math.round(hoursPerDay * 60);
+        LocalDate today = LocalDate.now();
+
+        // step 1: gather facts with tools
+        List<Deadline> deadlines = tools.get("deadlines", DeadlineTool.class).upcoming(null);
+        List<CourseProgress> progress = tools.get("progress", ProgressTool.class).progress(7);
+        if (progress.isEmpty()) throw new IllegalStateException("Add a course first.");
+
+        // step 2: rank what matters most
+        List<StudyPriority> priorities = PlanScheduler.rank(deadlines, progress, today);
+        if (priorities.isEmpty()) {
+            throw new IllegalStateException("Nothing to plan yet: add assessments with due dates in the next "
+                    + PlanScheduler.HORIZON_DAYS + " days, or take a quiz so weak topics can be found.");
+        }
+        Map<String, List<String>> weakTopics = new LinkedHashMap<>();
+        for (CourseProgress p : progress) {
+            weakTopics.put(p.course().getCode(),
+                    p.weakConcepts().stream().limit(3).map(m -> m.getTopic()).toList());
+        }
+
+        // step 3: ask the LLM for a schedule, or fall back to the deterministic plan
+        String fallbackReason = useLlm ? null : "no GEMINI_API_KEY in .env, running on the offline mock";
+        List<StudyTask> tasks = null;
+        if (useLlm) {
+            Set<String> codes = new HashSet<>();
+            progress.forEach(p -> codes.add(p.course().getCode()));
+            try {
+                tasks = askJson(planPrompt(priorities, progress, today, minutesPerDay), List.of(),
+                        reply -> parsePlan(reply, codes, today, minutesPerDay), "study plan");
+            } catch (LLMException e) {
+                fallbackReason = "AI request failed: " + e.getMessage();
+            }
+        }
+        List<String> notes = new ArrayList<>();
+        if (tasks == null) {
+            tasks = PlanScheduler.fallbackSchedule(priorities, weakTopics, today, PLAN_DAYS, minutesPerDay);
+            notes.add("Simple plan sorted by deadline x weight, because the AI was not available ("
+                    + fallbackReason + ").");
+        }
+
+        // step 4: respect the hours available per day
+        int[] cut = new int[1];
+        tasks = PlanScheduler.fitToDailyLimit(tasks, minutesPerDay, cut);
+        if (cut[0] > 0) notes.add(cut[0] + " min were cut so no day goes over " + minutesPerDay + " min.");
+        long later = deadlines.stream()
+                .filter(d -> d.item().getDueDate().isAfter(today.plusDays(PlanScheduler.HORIZON_DAYS))).count();
+        if (later > 0) {
+            notes.add(later + " assessment(s) due more than " + PlanScheduler.HORIZON_DAYS
+                    + " days from now are not in this week's plan.");
+        }
+
+        StudyPlan plan = new StudyPlan(today, PLAN_DAYS, minutesPerDay, priorities, tasks, fallbackReason == null);
+        notes.forEach(plan::addNote);
+        currentPlan = plan;
+        return plan;
+    }
+
+    /** The last plan built (possibly outdated), or null. */
+    public StudyPlan getCurrentPlan() {
+        return currentPlan;
+    }
+
+    private String planPrompt(List<StudyPriority> priorities, List<CourseProgress> progress, LocalDate today,
+                              int minutesPerDay) {
+        StringBuilder days = new StringBuilder();
+        for (int d = 0; d < PLAN_DAYS; d++) {
+            LocalDate date = today.plusDays(d);
+            days.append(date).append(" (")
+                    .append(date.getDayOfWeek().getDisplayName(TextStyle.SHORT, Locale.ENGLISH)).append(") ");
+        }
+        StringBuilder ranked = new StringBuilder();
+        for (int i = 0; i < priorities.size(); i++) {
+            StudyPriority p = priorities.get(i);
+            ranked.append(i + 1).append(". [").append(p.courseCode()).append("] ").append(p.title())
+                    .append(p.isDeadline() ? " (due " + p.dueDate() + ")" : "")
+                    .append(" | score ").append(p.score()).append(" | ").append(p.reason()).append('\n');
+        }
+        StringBuilder courses = new StringBuilder();
+        progress.forEach(p -> courses.append("- ").append(ProgressTool.describe(p)).append('\n'));
+        List<String> events = getRecentEvents();
+        return """
+                You are a study planner for a university student. Build a study schedule for these %d days:
+                %s
+                The student can study at most %d minutes per day. The total minutes on any date must not exceed that.
+
+                Priorities, ranked by the planner (higher score = more urgent; scores combine deadline urgency
+                x weight, weak topics, low grades and little recent study):
+                %s
+                Courses:
+                %s
+                Recent changes in the student's data: %s
+
+                Rules:
+                - Give more and earlier time to higher priorities, but spread work over several days.
+                - Never schedule work for an assessment after its due date.
+                - Each task is 25 to 90 minutes, names a concrete activity (e.g. "Practice quiz on Facade",
+                  "Review lecture notes on graphs") and uses only the course codes listed above.
+                - "reason" is one short sentence based on the facts above (deadline, weight, weak topic, grade).
+                Reply with ONLY a JSON object, no explanation and no markdown, in exactly this shape:
+                {"tasks":[{"date":"YYYY-MM-DD","course":"EECS3311","description":"...","minutes":60,"reason":"..."}]}
+                """.formatted(PLAN_DAYS, days.toString().trim(), minutesPerDay, ranked, courses,
+                events.isEmpty() ? "none" : String.join(", ", events));
+    }
+
+    /** Gson target for the LLM's plan JSON. */
+    private static class RawPlan {
+        List<RawTask> tasks;
+    }
+
+    private static class RawTask {
+        String date;
+        String course;
+        String description;
+        JsonElement minutes;
+        String reason;
+    }
+
+    /**
+     * Validates the LLM's plan: dates inside the week, known course codes, a description and at least
+     * 15 minutes. Bad tasks are dropped; throws JsonParseException (so askJson retries) when none are usable.
+     */
+    private static List<StudyTask> parsePlan(String reply, Set<String> courseCodes, LocalDate start,
+                                             int minutesPerDay) {
+        RawPlan raw = GSON.fromJson(jsonObjectIn(reply), RawPlan.class);
+        if (raw == null || raw.tasks == null) throw new JsonParseException("JSON has no 'tasks' list");
+        LocalDate end = start.plusDays(PLAN_DAYS - 1L);
+        List<StudyTask> tasks = new ArrayList<>();
+        for (RawTask t : raw.tasks) {
+            if (t == null || t.date == null || t.course == null || t.minutes == null
+                    || t.description == null || t.description.isBlank()) continue;
+            LocalDate date;
+            int minutes;
+            try {
+                date = LocalDate.parse(t.date.trim());
+                minutes = (int) Math.round(t.minutes.getAsDouble());
+            } catch (RuntimeException e) {
+                continue; // bad date or minutes: skip this task
+            }
+            if (date.isBefore(start) || date.isAfter(end) || minutes < PlanScheduler.MIN_BLOCK) continue;
+            String code = courseCodes.stream().filter(c -> c.equalsIgnoreCase(t.course.trim()))
+                    .findFirst().orElse(null);
+            if (code == null) continue;
+            tasks.add(new StudyTask(date, code, t.description.trim(), Math.min(minutes, minutesPerDay),
+                    t.reason == null ? "" : t.reason.trim()));
+        }
+        if (tasks.isEmpty()) throw new JsonParseException("no usable tasks in the plan");
+        return tasks;
+    }
+
+    /** Observer callback: remembers recent changes (newest last) and marks the current plan outdated. */
     @Override
     public void onDataChanged(String event) {
         recentEvents.addLast(event);
         while (recentEvents.size() > MEMORY_SIZE) recentEvents.removeFirst();
+        StudyPlan plan = currentPlan;
+        if (plan != null) plan.markOutdated(event);
     }
 
     public List<String> getRecentEvents() {

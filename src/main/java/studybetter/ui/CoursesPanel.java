@@ -12,7 +12,6 @@ import studybetter.domain.Topic;
 
 import javax.swing.BoxLayout;
 import javax.swing.DefaultListModel;
-import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JOptionPane;
@@ -22,7 +21,6 @@ import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.ListSelectionModel;
-import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.DefaultTableModel;
 import java.awt.BorderLayout;
 import java.awt.Dimension;
@@ -43,7 +41,6 @@ class CoursesPanel extends TabPanel {
     private final DefaultListModel<Material> materialModel = new DefaultListModel<>();
     private final JList<Material> materialList = new JList<>(materialModel);
     private final JTextArea summary = textArea();
-    private File lastFolder;
 
     CoursesPanel(AgentController controller, MainWindow window) {
         super(controller, window);
@@ -274,15 +271,6 @@ class CoursesPanel extends TabPanel {
             }
         }
         showCourse();
-    }
-
-    private File chooseTextFile(String title) {
-        JFileChooser chooser = new JFileChooser(lastFolder);
-        chooser.setDialogTitle(title);
-        chooser.setFileFilter(new FileNameExtensionFilter("Text or Markdown (*.txt, *.md)", "txt", "md"));
-        if (chooser.showOpenDialog(window) != JFileChooser.APPROVE_OPTION) return null;
-        lastFolder = chooser.getCurrentDirectory();
-        return chooser.getSelectedFile();
     }
 
     private Course findInModel(String code) {
