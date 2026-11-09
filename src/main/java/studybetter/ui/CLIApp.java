@@ -2,6 +2,8 @@ package studybetter.ui;
 
 import studybetter.controller.AgentController;
 import studybetter.controller.AgentController.DeadlineReport;
+import studybetter.controller.AgentController.SyllabusResult;
+import studybetter.controller.AgentController.SyllabusSaveResult;
 import studybetter.controller.AgentController.UploadResult;
 import studybetter.domain.AssessmentItem;
 import studybetter.domain.ConceptMastery;
@@ -9,6 +11,8 @@ import studybetter.domain.Course;
 import studybetter.domain.Explanation;
 import studybetter.domain.Material;
 import studybetter.domain.StudySession;
+import studybetter.domain.SyllabusDraft;
+import studybetter.domain.Topic;
 import studybetter.service.DeadlineTracker.Deadline;
 
 import java.time.LocalDate;
@@ -64,6 +68,8 @@ public class CLIApp {
             case "add-course" -> addCourse();
             case "delete-course" -> deleteCourse();
             case "add-item" -> addItem();
+            case "import-syllabus" -> importSyllabus();
+            case "topics" -> topics();
             case "deadlines" -> deadlines();
             case "complete" -> complete();
             case "grade" -> grade();
@@ -88,6 +94,8 @@ public class CLIApp {
                   add-course       add a course (code, name, term)
                   delete-course    delete a course and its assessments
                   add-item         add an assessment to a course (title, due date, weight)
+                  import-syllabus  extract assessments and topics from a .txt/.md syllabus (review before saving)
+                  topics           list a course's topics by week
                   deadlines        show upcoming, due-soon, overdue and undated assessments
                   complete         mark an assessment as completed
                   grade            enter a mark for an assessment
@@ -138,11 +146,90 @@ public class CLIApp {
 
     private void addItem() {
         String code = controller.findCourse(required("Course code: ")).getCode();
-        String title = required("Title: ");
+        addItemTo(code, required("Title: "));
+    }
+
+    /** Asks for the due date and weight of one assessment and saves it. */
+    private void addItemTo(String code, String title) {
         LocalDate due = parseDate(prompt("Due date (YYYY-MM-DD, blank for none): "));
         double weight = parseNumber(required("Weight (%): "));
         AssessmentItem item = controller.addAssessment(code, title, due, weight);
         System.out.println("Added " + item.getTitle() + " to " + code);
+    }
+
+    // ---------- syllabus import (agent) ----------
+
+    /** F02: extract, show for review, save only after "y". Falls back to manual entry if the AI fails. */
+    private void importSyllabus() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        String path = stripQuotes(required("Path to syllabus (.txt or .md): "));
+        System.out.println("Reading the syllabus...");
+        SyllabusResult result = controller.importSyllabus(code, path);
+        if (!result.extracted()) {
+            System.out.println("Could not extract the syllabus automatically (" + result.error() + ").");
+            manualEntry(code);
+            return;
+        }
+        SyllabusDraft draft = result.draft();
+        System.out.println("\nAssessments found:");
+        if (draft.getItems().isEmpty()) System.out.println("  (none)");
+        for (AssessmentItem it : draft.getItems()) {
+            String due = it.getDueDate() == null ? "NO DATE" : it.getDueDate().toString();
+            System.out.printf("  - %-28s %-10s %5.1f%%%n", it.getTitle(), due, it.getWeight());
+        }
+        System.out.printf("  Total weight: %.1f%%%n", draft.totalWeight());
+        System.out.println("Topics found:");
+        if (draft.getTopics().isEmpty()) System.out.println("  (none)");
+        draft.getTopics().forEach(t -> System.out.println("  - " + (t.getWeek() > 0 ? t : t.getName())));
+        if (!draft.getWarnings().isEmpty()) {
+            System.out.println("Please check:");
+            draft.getWarnings().forEach(w -> System.out.println("  ! " + w));
+        }
+        String answer = prompt("\nSave these to " + code + "? (y/n): ");
+        if (answer == null || !answer.equalsIgnoreCase("y")) {
+            System.out.println("Nothing saved. You can add items yourself with 'add-item'.");
+            return;
+        }
+        SyllabusSaveResult saved = controller.saveSyllabus(code, draft);
+        System.out.println("Saved " + saved.itemsAdded() + " assessment(s) and " + saved.topicsAdded()
+                + " topic(s) to " + code + ".");
+        if (!saved.skipped().isEmpty()) {
+            System.out.println("Skipped (already in the course): " + String.join(", ", saved.skipped()));
+        }
+        if (!draft.itemsWithoutDates().isEmpty()) {
+            System.out.println("Tip: items with no date can be completed and graded, but won't appear as deadlines.");
+        }
+    }
+
+    /** Fallback for F02 when the AI is unavailable: enter assessments one by one, like 'add-item'. */
+    private void manualEntry(String code) {
+        String answer = prompt("Enter the assessments manually now? (y/n): ");
+        if (answer == null || !answer.equalsIgnoreCase("y")) {
+            System.out.println("OK. You can add them later with 'add-item'.");
+            return;
+        }
+        int added = 0;
+        while (true) {
+            String title = prompt("\nTitle (blank to finish): ");
+            if (title == null || title.isBlank()) break;
+            try {
+                addItemTo(code, title);
+                added++;
+            } catch (IllegalArgumentException e) {
+                System.out.println("Error: " + e.getMessage() + " (item not added)");
+            }
+        }
+        System.out.println("Added " + added + " assessment(s) to " + code + ".");
+    }
+
+    private void topics() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        List<Topic> list = controller.getTopics(code);
+        if (list.isEmpty()) {
+            System.out.println(code + " has no topics. Use 'import-syllabus'.");
+            return;
+        }
+        list.forEach(t -> System.out.println("  " + (t.getWeek() > 0 ? t : t.getName())));
     }
 
     private void deadlines() {

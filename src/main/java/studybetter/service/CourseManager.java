@@ -1,7 +1,9 @@
 package studybetter.service;
 
+import studybetter.domain.AssessmentItem;
 import studybetter.domain.Course;
 import studybetter.domain.Material;
+import studybetter.domain.Topic;
 import studybetter.persistence.DataStore;
 
 import java.io.IOException;
@@ -61,6 +63,17 @@ public class CourseManager {
      * PDFs are not supported yet: the student should export the text first.
      */
     public Material readMaterialFile(Path path) {
+        String text = readTextFile(path);
+        String name = path.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        Material material = new Material(name.substring(0, dot), path.toAbsolutePath().toString(),
+                name.substring(dot + 1).toLowerCase());
+        material.setText(text);
+        return material;
+    }
+
+    /** Reads a .txt or .md file (UTF-8, at most 2 MB, not empty). Used for materials and syllabi. */
+    public String readTextFile(Path path) {
         if (path == null || !Files.isRegularFile(path)) {
             throw new IllegalArgumentException("File not found: " + path);
         }
@@ -77,9 +90,7 @@ public class CourseManager {
             }
             String text = Files.readString(path, StandardCharsets.UTF_8);
             if (text.isBlank()) throw new IllegalArgumentException("File is empty: " + name);
-            Material material = new Material(name.substring(0, dot), path.toAbsolutePath().toString(), ext);
-            material.setText(text);
-            return material;
+            return text;
         } catch (MalformedInputException e) {
             throw new IllegalArgumentException("File is not UTF-8 text: " + name);
         } catch (IOException e) {
@@ -111,6 +122,14 @@ public class CourseManager {
 
     public void addAssessment(String courseId, studybetter.domain.AssessmentItem item) {
         getCourse(courseId).addItem(item);
+        save();
+    }
+
+    /** F02: adds confirmed syllabus assessments and topics to a course and saves once. */
+    public void importSyllabus(String courseId, List<AssessmentItem> items, List<Topic> topics) {
+        Course course = getCourse(courseId);
+        items.forEach(course::addItem);
+        topics.forEach(course::addTopic);
         save();
     }
 }

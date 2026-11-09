@@ -11,6 +11,8 @@ import studybetter.domain.Course;
 import studybetter.domain.Explanation;
 import studybetter.domain.Material;
 import studybetter.domain.StudySession;
+import studybetter.domain.SyllabusDraft;
+import studybetter.domain.Topic;
 import studybetter.llm.GeminiClient;
 import studybetter.llm.LLMClient;
 import studybetter.llm.LLMException;
@@ -44,6 +46,14 @@ public class AgentController {
     public record UploadResult(Material material, String summaryError) {
         public boolean summarized() { return summaryError == null; }
     }
+
+    /** Result of extracting a syllabus. {@code draft} is null and {@code error} explains why when it failed. */
+    public record SyllabusResult(SyllabusDraft draft, String error) {
+        public boolean extracted() { return draft != null; }
+    }
+
+    /** What {@link #saveSyllabus} actually saved; {@code skipped} lists titles already in the course. */
+    public record SyllabusSaveResult(int itemsAdded, int topicsAdded, List<String> skipped) {}
 
     private final CourseManager courseManager;
     private final DeadlineTracker deadlineTracker;
@@ -159,6 +169,59 @@ public class AgentController {
     /** F05: explains a concept using the course's materials when they match, otherwise a labelled general answer. */
     public Explanation explainConcept(String courseCode, String question) {
         return agent.explain(findCourse(courseCode), question);
+    }
+
+    /**
+     * F02 step 1: reads a .txt/.md syllabus and asks the agent to extract assessments and topics.
+     * Nothing is saved here; the UI shows the draft and calls {@link #saveSyllabus} after the student confirms.
+     * If the LLM is unavailable the result carries the error, so the UI can offer manual entry.
+     */
+    public SyllabusResult importSyllabus(String courseCode, String filePath) {
+        Course course = findCourse(courseCode);
+        if (filePath == null || filePath.isBlank()) throw new IllegalArgumentException("File path is required");
+        String text = courseManager.readTextFile(Path.of(filePath.trim()));
+        if (!usingRealLlm) {
+            // the offline mock cannot read a syllabus
+            return new SyllabusResult(null, "no GEMINI_API_KEY in .env, running on the offline mock");
+        }
+        SyllabusDraft draft;
+        try {
+            draft = agent.extractSyllabus(text);
+        } catch (LLMException e) {
+            return new SyllabusResult(null, e.getMessage());
+        }
+        for (AssessmentItem item : draft.getItems()) {
+            if (hasItemTitled(course, item.getTitle())) {
+                draft.addWarning("'" + item.getTitle() + "' is already in " + course.getCode()
+                        + " and will be skipped.");
+            }
+        }
+        return new SyllabusResult(draft, null);
+    }
+
+    /** F02 step 2: saves a confirmed draft, skipping assessments and topics the course already has. */
+    public SyllabusSaveResult saveSyllabus(String courseCode, SyllabusDraft draft) {
+        Course course = findCourse(courseCode);
+        if (draft == null || draft.isEmpty()) throw new IllegalArgumentException("Nothing to import");
+        List<AssessmentItem> newItems = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+        for (AssessmentItem item : draft.getItems()) {
+            if (hasItemTitled(course, item.getTitle())) skipped.add(item.getTitle());
+            else newItems.add(item);
+        }
+        List<Topic> newTopics = draft.getTopics().stream()
+                .filter(t -> course.getTopics().stream().noneMatch(old -> old.getName().equalsIgnoreCase(t.getName())))
+                .toList();
+        courseManager.importSyllabus(course.getId(), newItems, newTopics);
+        return new SyllabusSaveResult(newItems.size(), newTopics.size(), skipped);
+    }
+
+    public List<Topic> getTopics(String courseCode) {
+        return findCourse(courseCode).getTopics();
+    }
+
+    private static boolean hasItemTitled(Course course, String title) {
+        return course.getItems().stream().anyMatch(i -> i.getTitle().equalsIgnoreCase(title));
     }
 
     public AssessmentItem addAssessment(String courseCode, String title, LocalDate dueDate, double weight) {
