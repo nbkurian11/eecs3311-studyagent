@@ -10,10 +10,11 @@ import java.util.List;
 
 public class MasteryTracker extends Subject {
 
+    /** Records each graded question for its topic; partial credit counts as a partial result. Pending and untagged questions are skipped. */
     public void update(GradeResult result) {
         for (GradeResult.QuestionResult q : result.getResults()) {
-            if (q.topic() == null || q.topic().isBlank()) continue;
-            find(result.getCourseId(), q.topic()).record(q.correct());
+            if (q.pending() || q.topic() == null || q.topic().isBlank()) continue;
+            find(result.getCourseId(), q.topic()).record(q.fraction());
         }
         DataStore.getInstance().saveAll();
         notifyObservers("mastery");

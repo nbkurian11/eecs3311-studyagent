@@ -34,6 +34,8 @@ public abstract class PracticeAssessment {
     private List<String> warnings = new ArrayList<>();
     private LocalDateTime createdAt;
     private LocalDateTime submittedAt;
+    /** Null until graded (F08); may still contain pending short answers. */
+    private GradeResult result;
 
     protected PracticeAssessment(String type, PracticeSettings settings) {
         this.type = type;
@@ -126,6 +128,20 @@ public abstract class PracticeAssessment {
 
     public boolean isSubmitted() { return submittedAt != null; }
 
+    /** Stores the grading result (replacing an earlier one that had pending answers). */
+    public void setResult(GradeResult result) {
+        if (!isSubmitted()) throw new IllegalStateException("Submit the answers before grading");
+        this.result = result;
+    }
+
+    public GradeResult getResult() { return result; }
+
+    /** Fully graded: a result exists and nothing is pending. */
+    public boolean isGraded() { return result != null && result.isComplete(); }
+
+    /** Submitted but not graded yet, or graded with short answers still pending. */
+    public boolean needsGrading() { return isSubmitted() && !isGraded(); }
+
     /** Only mock exams are timed; 0 means no time limit. */
     public int getTimeLimitMinutes() { return 0; }
 
@@ -144,9 +160,10 @@ public abstract class PracticeAssessment {
 
     @Override
     public String toString() {
-        String status = isSubmitted()
-                ? getAnsweredCount() + "/" + questions.size() + " answered, awaiting grading"
-                : "not submitted";
+        String status;
+        if (!isSubmitted()) status = "not submitted";
+        else if (result == null) status = getAnsweredCount() + "/" + questions.size() + " answered, awaiting grading";
+        else status = "score " + result;
         return title + " (" + courseCode + ", " + questions.size() + " questions, " + status + ")";
     }
 }

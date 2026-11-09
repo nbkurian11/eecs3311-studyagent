@@ -10,6 +10,7 @@ import studybetter.domain.AssessmentItem;
 import studybetter.domain.ConceptMastery;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
+import studybetter.domain.GradeResult;
 import studybetter.domain.Material;
 import studybetter.domain.PracticeAssessment;
 import studybetter.domain.PracticeSettings;
@@ -63,6 +64,11 @@ public class AgentController {
     /** Result of generating practice. {@code practice} is null and {@code error} explains why when it failed. */
     public record PracticeResult(PracticeAssessment practice, String error) {
         public boolean created() { return practice != null; }
+    }
+
+    /** Result of analyzing a past test. {@code result} is null and {@code error} explains why when it failed. */
+    public record PastTestResult(GradeResult result, String error) {
+        public boolean analyzed() { return result != null; }
     }
 
     private final CourseManager courseManager;
@@ -268,6 +274,56 @@ public class AgentController {
     public void saveAnswers(PracticeAssessment practice, List<String> answers) {
         practice.submitAnswers(answers);
         practiceManager.save(practice);
+    }
+
+    /**
+     * F08: grades a saved quiz or mock exam, passes the newly graded answers to MasteryTracker (F09) and saves the
+     * result on the attempt. Multiple choice is graded deterministically; short answers by the LLM, or left pending
+     * when it is unavailable. Calling it again on an attempt with pending answers grades only those.
+     */
+    public GradeResult gradePractice(String practiceId) {
+        PracticeAssessment practice = practiceManager.findById(practiceId);
+        if (!practice.isSubmitted()) throw new IllegalStateException("This practice has not been submitted yet");
+        if (practice.isGraded()) throw new IllegalStateException("This practice is already graded: " + practice.getResult());
+        GradeResult previous = practice.getResult();
+        GradeResult result = agent.gradePractice(practice, previous, usingRealLlm);
+        practice.setResult(result);
+        practiceManager.save(practice);
+        GradeResult fresh = result.newlyGradedSince(previous);
+        if (!fresh.getResults().isEmpty()) masteryTracker.update(fresh);
+        return result;
+    }
+
+    /** Saved practice that is not graded yet or still has pending short answers, newest first. */
+    public List<PracticeAssessment> getPracticesToGrade(String courseCode) {
+        return practiceManager.getPracticesToGrade(findCourse(courseCode).getId());
+    }
+
+    /**
+     * F08 step 1 for past tests: reads a .txt graded test and has the agent extract the questions, marks and topics
+     * and explain the lost marks. Mastery is not changed here: the UI shows the result and calls
+     * {@link #recordPastTest} after the student confirms it. LLM failures come back in the result's error.
+     */
+    public PastTestResult analyzePastTest(String courseCode, String filePath) {
+        Course course = findCourse(courseCode);
+        if (filePath == null || filePath.isBlank()) throw new IllegalArgumentException("File path is required");
+        Path path = Path.of(filePath.trim());
+        String text = courseManager.readTextFile(path);
+        if (!usingRealLlm) {
+            // the offline mock cannot read a test
+            return new PastTestResult(null, "no GEMINI_API_KEY in .env, running on the offline mock");
+        }
+        try {
+            return new PastTestResult(agent.analyzePastTest(course, "Past test: " + path.getFileName(), text), null);
+        } catch (LLMException e) {
+            return new PastTestResult(null, e.getMessage());
+        }
+    }
+
+    /** F08 step 2 for past tests: adds a confirmed past-test result to concept mastery (F09). */
+    public void recordPastTest(GradeResult result) {
+        if (result == null || result.getResults().isEmpty()) throw new IllegalArgumentException("Nothing to record");
+        masteryTracker.update(result);
     }
 
     /** The course's submitted practice tests, newest first. */

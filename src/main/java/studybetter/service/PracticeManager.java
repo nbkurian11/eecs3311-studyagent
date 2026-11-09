@@ -20,6 +20,18 @@ public class PracticeManager {
         DataStore.getInstance().saveAll();
     }
 
+    public PracticeAssessment findById(String id) {
+        return DataStore.getInstance().getPractices().stream()
+                .filter(p -> p.getId().equals(id))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("No saved practice with id " + id));
+    }
+
+    /** A course's practice that is not graded yet or still has pending short answers, newest first. */
+    public List<PracticeAssessment> getPracticesToGrade(String courseId) {
+        return getPractices(courseId).stream().filter(PracticeAssessment::needsGrading).toList();
+    }
+
     /** A course's submitted practice, newest first. */
     public List<PracticeAssessment> getPractices(String courseId) {
         return DataStore.getInstance().getPractices().stream()

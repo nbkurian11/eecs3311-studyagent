@@ -7,7 +7,9 @@ import studybetter.agent.MaterialSearchTool.Passage;
 import studybetter.domain.AssessmentItem;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
+import studybetter.domain.GradeResult;
 import studybetter.domain.Material;
+import studybetter.domain.PracticeAssessment;
 import studybetter.domain.Question;
 import studybetter.domain.QuestionGenerator;
 import studybetter.domain.SyllabusDraft;
@@ -29,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * The AI study agent. It gathers information with tools from the {@link ToolRegistry}
@@ -327,11 +330,11 @@ public class StudyAgent implements DataObserver, QuestionGenerator {
         List<Question> questions;
         int[] dropped = new int[1];
         try {
-            questions = parseQuestions(askForQuestions(prompt, context), countsByTopic, difficulty, dropped);
+            questions = parseQuestions(ask(prompt, context), countsByTopic, difficulty, dropped);
         } catch (JsonParseException firstError) {
             try {
                 dropped[0] = 0;
-                questions = parseQuestions(askForQuestions(prompt + "\n\nIMPORTANT: your previous reply was not "
+                questions = parseQuestions(ask(prompt + "\n\nIMPORTANT: your previous reply was not "
                         + "valid. Reply with the JSON object only, in the exact shape shown.", context),
                         countsByTopic, difficulty, dropped);
             } catch (JsonParseException secondError) {
@@ -342,7 +345,8 @@ public class StudyAgent implements DataObserver, QuestionGenerator {
         return new QuestionBatch(questions, warnings);
     }
 
-    private String askForQuestions(String prompt, List<String> context) {
+    /** Sends the prompt, with the retrieved passages as context when there are any. */
+    private String ask(String prompt, List<String> context) {
         return context.isEmpty() ? llm.generate(prompt) : llm.generateWithContext(prompt, context);
     }
 
@@ -427,6 +431,341 @@ public class StudyAgent implements DataObserver, QuestionGenerator {
             if (lower.contains(g) || g.contains(lower)) return t;
         }
         return topics.size() == 1 ? topics.iterator().next() : null;
+    }
+
+    // ---------- F08: grading practice ----------
+
+    /** A question sent to the LLM: GRADE a short answer, or EXPLAIN a wrong multiple choice answer. */
+    private record GradingItem(int id, Question question, String answer, boolean needsScore) {}
+
+    /** The LLM's verdict for one item; {@code score} is null for EXPLAIN items. */
+    private record AiGrade(Double score, String feedback) {}
+
+    /**
+     * F08: grades a submitted quiz or mock exam.
+     * Step 1: multiple choice is checked against the answer key (deterministic); blank answers get 0.
+     * Step 2: short answers are sent to the LLM in one request for a score (1, 0.5 or 0) and feedback, together
+     * with the wrong multiple choice answers, which only get an explanation (their score stays deterministic).
+     * If the LLM is unavailable, short answers stay pending and multiple choice keeps its plain feedback.
+     * When {@code previous} is given, its graded answers are kept and only its pending ones are graded again.
+     */
+    public GradeResult gradePractice(PracticeAssessment practice, GradeResult previous, boolean useLlm) {
+        List<Question> questions = practice.getQuestions();
+        List<String> answers = practice.getAnswers();
+        GradeResult.QuestionResult[] results = new GradeResult.QuestionResult[questions.size()];
+        List<GradingItem> toAsk = new ArrayList<>();
+        for (int i = 0; i < questions.size(); i++) {
+            if (previous != null && i < previous.getResults().size() && !previous.getResults().get(i).pending()) {
+                results[i] = previous.getResults().get(i);
+                continue;
+            }
+            Question q = questions.get(i);
+            String answer = i < answers.size() ? answers.get(i) : "";
+            if (q.isMultipleChoice()) {
+                results[i] = gradeMultipleChoice(q, answer);
+                if (!results[i].correct() && !answer.isBlank()) toAsk.add(new GradingItem(i + 1, q, answer, false));
+            } else if (answer.isBlank()) {
+                results[i] = new GradeResult.QuestionResult(q.getText(), q.getTopic(), "", q.getAnswer(), 0, 1,
+                        "No answer given.", false);
+            } else {
+                results[i] = GradeResult.QuestionResult.pending(q.getText(), q.getTopic(), answer, q.getAnswer(), 1,
+                        "Pending: not graded yet.");
+                toAsk.add(new GradingItem(i + 1, q, answer, true));
+            }
+        }
+
+        List<String> warnings = new ArrayList<>();
+        boolean hasShortAnswers = toAsk.stream().anyMatch(GradingItem::needsScore);
+        if (!toAsk.isEmpty() && !useLlm) {
+            if (hasShortAnswers) warnings.add("Short answers are pending: the AI is not available "
+                    + "(no GEMINI_API_KEY in .env). Run 'grade-practice' later.");
+        } else if (!toAsk.isEmpty()) {
+            try {
+                Map<Integer, AiGrade> grades = askForGrades(practice, toAsk);
+                int missing = 0;
+                for (GradingItem item : toAsk) {
+                    AiGrade g = grades.get(item.id());
+                    int i = item.id() - 1;
+                    GradeResult.QuestionResult old = results[i];
+                    if (g == null) {
+                        if (item.needsScore()) missing++;
+                    } else if (item.needsScore()) {
+                        results[i] = new GradeResult.QuestionResult(old.question(), old.topic(), old.studentAnswer(),
+                                old.correctAnswer(), g.score(), 1, g.feedback(), false);
+                    } else {
+                        results[i] = new GradeResult.QuestionResult(old.question(), old.topic(), old.studentAnswer(),
+                                old.correctAnswer(), old.points(), old.maxPoints(),
+                                old.feedback() + " " + g.feedback(), false);
+                    }
+                }
+                if (missing > 0) warnings.add(missing + " short answer(s) were not graded by the AI and are still "
+                        + "pending. Run 'grade-practice' again later.");
+            } catch (LLMException e) {
+                if (hasShortAnswers) warnings.add("Short answers are pending (AI request failed: " + e.getMessage()
+                        + "). Run 'grade-practice' later.");
+                else warnings.add("Could not get explanations for the wrong answers (" + e.getMessage() + ").");
+            }
+        }
+        GradeResult result = new GradeResult(practice.getCourseId(), practice.getTitle(), List.of(results));
+        warnings.forEach(result::addWarning);
+        return result;
+    }
+
+    /** Deterministic: compares the chosen letter with the answer key. */
+    private static GradeResult.QuestionResult gradeMultipleChoice(Question q, String answer) {
+        String correctText = q.getAnswer() + ") " + q.getCorrectAnswerText();
+        int chosen = Question.indexOfLetter(answer);
+        String chosenText = chosen >= 0 && chosen < q.getOptions().size()
+                ? Question.letter(chosen) + ") " + q.getOptions().get(chosen) : answer;
+        boolean right = chosen >= 0 && Question.letter(chosen).equals(q.getAnswer());
+        String feedback = right ? "Correct." : (answer.isBlank() ? "No answer given." : "Wrong.");
+        return new GradeResult.QuestionResult(q.getText(), q.getTopic(), chosenText, correctText,
+                right ? 1 : 0, 1, feedback, false);
+    }
+
+    /** One LLM request for all items; returns the valid verdicts by item id (retried once if unusable). */
+    private Map<Integer, AiGrade> askForGrades(PracticeAssessment practice, List<GradingItem> items) {
+        StringBuilder list = new StringBuilder();
+        for (GradingItem item : items) {
+            Question q = item.question();
+            list.append("\nItem ").append(item.id()).append(item.needsScore() ? " (GRADE)" : " (EXPLAIN)")
+                    .append("\nTopic: ").append(q.getTopic())
+                    .append("\nQuestion: ").append(q.getText());
+            if (item.needsScore()) {
+                list.append("\nModel answer: ").append(q.getAnswer())
+                        .append("\nStudent answer: ").append(item.answer());
+            } else {
+                for (int o = 0; o < q.getOptions().size(); o++) {
+                    list.append("\n  ").append(Question.letter(o)).append(") ").append(q.getOptions().get(o));
+                }
+                list.append("\nCorrect answer: ").append(q.getAnswer())
+                        .append("\nStudent chose: ").append(item.answer().toUpperCase());
+            }
+            list.append('\n');
+        }
+        String prompt = """
+                You are grading a student's answers to "%s" for the university course %s.
+                Write feedback to the student (1 to 3 sentences) for every item below.
+                - GRADE items are short answers. Compare them with the model answer, accepting any wording with the
+                  same meaning. "score" is 1 if correct and complete, 0.5 if partly correct, 0 if wrong.
+                - EXPLAIN items are multiple-choice questions the student got wrong. Explain why the correct answer
+                  is right and why the student's choice is wrong. Use "score": null.
+                Reply with ONLY a JSON object, no explanation and no markdown, in exactly this shape:
+                {"results":[{"id":1,"score":0.5,"feedback":"..."}]}
+                %s""".formatted(practice.getTitle(), practice.getCourseCode(), list);
+        Set<Integer> scored = new HashSet<>();
+        Set<Integer> ids = new HashSet<>();
+        for (GradingItem item : items) {
+            ids.add(item.id());
+            if (item.needsScore()) scored.add(item.id());
+        }
+        return askJson(prompt, List.of(), reply -> parseGrades(reply, ids, scored), "grades");
+    }
+
+    private static class RawGrades {
+        List<RawGrade> results;
+    }
+
+    private static class RawGrade {
+        Integer id;
+        JsonElement score;
+        String feedback;
+    }
+
+    private static Map<Integer, AiGrade> parseGrades(String reply, Set<Integer> ids, Set<Integer> scored) {
+        RawGrades raw = GSON.fromJson(jsonObjectIn(reply), RawGrades.class);
+        if (raw == null || raw.results == null) throw new JsonParseException("JSON has no 'results' list");
+        Map<Integer, AiGrade> grades = new LinkedHashMap<>();
+        for (RawGrade g : raw.results) {
+            if (g == null || g.id == null || !ids.contains(g.id) || g.feedback == null || g.feedback.isBlank()) continue;
+            Double score = null;
+            if (scored.contains(g.id)) {
+                score = toNumber(g.score);
+                if (score == null || score < 0 || score > 1) continue;
+                score = Math.round(score * 2) / 2.0; // only 0, 0.5 or 1
+            }
+            grades.put(g.id, new AiGrade(score, g.feedback.trim()));
+        }
+        if (grades.isEmpty()) throw new JsonParseException("no usable grades in the reply");
+        return grades;
+    }
+
+    // ---------- F08: analyzing a graded past test ----------
+
+    /**
+     * F08: analyzes a graded past test (plain text).
+     * Step 1: the LLM extracts each question, the marks earned and available, and a topic (matched to the course's
+     * topics where possible) as JSON, which is validated. Step 2: for questions where marks were lost, the agent
+     * retrieves related course material and asks the LLM to explain what was missing.
+     * Throws {@link LLMException} if step 1 fails; if only step 2 fails, the marks are kept without explanations.
+     */
+    public GradeResult analyzePastTest(Course course, String title, String text) {
+        if (text == null || text.isBlank()) throw new IllegalArgumentException("The test file is empty");
+        if (text.length() > MAX_SYLLABUS_INPUT_CHARS) text = text.substring(0, MAX_SYLLABUS_INPUT_CHARS);
+        String topics = course.getTopics().isEmpty() ? "(none listed)"
+                : String.join("; ", course.getTopics().stream().map(Topic::getName).toList());
+        String prompt = """
+                Below is a graded test from the university course %s. Extract every question with the marks the
+                student received. Known course topics: %s
+                Reply with ONLY a JSON object, no explanation and no markdown, in exactly this shape:
+                {"questions":[{"number":"1a","question":"...","studentAnswer":"...","marksEarned":3,"marksAvailable":5,
+                 "topic":"..."}]}
+                Rules:
+                - marksEarned and marksAvailable are plain numbers; use null if the test does not show them.
+                - studentAnswer is what the student wrote (shortened if long), or null if it is not shown.
+                - topic is one of the known course topics when it fits, otherwise a short concept name (2 to 4 words).
+                - Keep each question under 300 characters.
+
+                Test:
+                %s""".formatted(describe(course), topics, text);
+        List<String> warnings = new ArrayList<>();
+        List<GradeResult.QuestionResult> extracted = askJson(prompt, List.of(),
+                reply -> parsePastTest(reply, course, warnings), "test questions and marks");
+
+        List<Integer> lost = new ArrayList<>();
+        for (int i = 0; i < extracted.size(); i++) if (!extracted.get(i).correct()) lost.add(i);
+        List<GradeResult.QuestionResult> results = new ArrayList<>(extracted);
+        if (!lost.isEmpty()) {
+            try {
+                Map<Integer, String> explanations = explainLostMarks(course, extracted, lost);
+                for (int i : lost) {
+                    String why = explanations.getOrDefault(i + 1, "No explanation was returned for this question.");
+                    results.set(i, withFeedback(extracted.get(i), why));
+                }
+            } catch (LLMException e) {
+                warnings.add("Could not explain the lost marks (" + e.getMessage() + "). The marks are still shown.");
+                for (int i : lost) results.set(i, withFeedback(extracted.get(i), "Explanation unavailable."));
+            }
+        }
+        GradeResult result = new GradeResult(course.getId(), title, results);
+        warnings.forEach(result::addWarning);
+        return result;
+    }
+
+    private static GradeResult.QuestionResult withFeedback(GradeResult.QuestionResult r, String feedback) {
+        return new GradeResult.QuestionResult(r.question(), r.topic(), r.studentAnswer(), r.correctAnswer(),
+                r.points(), r.maxPoints(), feedback, false);
+    }
+
+    private static class RawPastTest {
+        List<RawPastQuestion> questions;
+    }
+
+    private static class RawPastQuestion {
+        String number;
+        String question;
+        String studentAnswer;
+        JsonElement marksEarned;
+        JsonElement marksAvailable;
+        String topic;
+    }
+
+    /** Validates the extracted questions; ones without readable marks are skipped with a warning. */
+    private static List<GradeResult.QuestionResult> parsePastTest(String reply, Course course, List<String> warnings) {
+        RawPastTest raw = GSON.fromJson(jsonObjectIn(reply), RawPastTest.class);
+        if (raw == null || raw.questions == null) throw new JsonParseException("JSON has no 'questions' list");
+        List<String> skipped = new ArrayList<>();
+        List<GradeResult.QuestionResult> results = new ArrayList<>();
+        for (RawPastQuestion q : raw.questions) {
+            if (q == null || q.question == null || q.question.isBlank()) continue;
+            String label = (q.number == null || q.number.isBlank() ? "" : "Q" + q.number.trim() + ". ")
+                    + q.question.trim();
+            Double earned = toNumber(q.marksEarned);
+            Double available = toNumber(q.marksAvailable);
+            if (earned == null || available == null || available <= 0 || earned < 0 || earned > available) {
+                skipped.add(q.number == null ? q.question.trim() : "Q" + q.number.trim());
+                continue;
+            }
+            String answer = q.studentAnswer == null || q.studentAnswer.equalsIgnoreCase("null") ? null : q.studentAnswer;
+            results.add(new GradeResult.QuestionResult(label, matchCourseTopic(q.topic, course), answer, null,
+                    earned, available, earned.equals(available) ? "Full marks." : "", false));
+        }
+        if (results.isEmpty()) throw new JsonParseException("no questions with readable marks in the reply");
+        if (!skipped.isEmpty()) {
+            warnings.add("Skipped " + String.join(", ", skipped) + ": the marks were not shown or not readable.");
+        }
+        return results;
+    }
+
+    /** Uses the course's spelling when the LLM's topic matches a course topic; otherwise keeps the LLM's name. */
+    private static String matchCourseTopic(String given, Course course) {
+        if (given == null || given.isBlank() || given.equalsIgnoreCase("null")) return null;
+        String g = given.trim();
+        for (Topic t : course.getTopics()) if (t.getName().equalsIgnoreCase(g)) return t.getName();
+        for (Topic t : course.getTopics()) {
+            String name = t.getName().toLowerCase();
+            if (name.contains(g.toLowerCase()) || g.toLowerCase().contains(name)) return t.getName();
+        }
+        return g;
+    }
+
+    /** Step 2 of the past-test analysis: explanations by question number (1-based), using course material. */
+    private Map<Integer, String> explainLostMarks(Course course, List<GradeResult.QuestionResult> questions,
+                                                  List<Integer> lost) {
+        MaterialSearchTool search = tools.get("material-search", MaterialSearchTool.class);
+        List<String> context = new ArrayList<>();
+        Set<String> searched = new HashSet<>();
+        StringBuilder list = new StringBuilder();
+        for (int i : lost) {
+            GradeResult.QuestionResult q = questions.get(i);
+            String topic = q.topic() == null ? q.question() : q.topic();
+            if (searched.add(topic.toLowerCase())) {
+                for (Passage p : search.search(course.getId(), topic, PASSAGES_PER_TOPIC)) {
+                    if (context.size() < MAX_QUESTION_PASSAGES) context.add("From \"" + p.materialTitle() + "\":\n" + p.text());
+                }
+            }
+            list.append("\nItem ").append(i + 1)
+                    .append("\nQuestion: ").append(q.question())
+                    .append("\nStudent answer: ").append(q.studentAnswer() == null ? "(not shown)" : q.studentAnswer())
+                    .append("\nMarks: ").append(GradeResult.formatPoints(q.points())).append('/')
+                    .append(GradeResult.formatPoints(q.maxPoints()))
+                    .append("\nTopic: ").append(q.topic() == null ? "(unknown)" : q.topic()).append('\n');
+        }
+        String prompt = """
+                A student lost marks on these questions of a graded test in the university course %s.
+                For each item, explain to the student in 2 to 4 sentences what was probably missing or wrong and what
+                to review.%s
+                Reply with ONLY a JSON object, no explanation and no markdown, in exactly this shape:
+                {"explanations":[{"id":1,"feedback":"..."}]}
+                %s""".formatted(describe(course),
+                context.isEmpty() ? "" : " Use the course material above where it helps.", list);
+        Set<Integer> ids = new HashSet<>();
+        lost.forEach(i -> ids.add(i + 1));
+        return askJson(prompt, context, reply -> parseExplanations(reply, ids), "explanations");
+    }
+
+    private static class RawExplanations {
+        List<RawGrade> explanations;
+    }
+
+    private static Map<Integer, String> parseExplanations(String reply, Set<Integer> ids) {
+        RawExplanations raw = GSON.fromJson(jsonObjectIn(reply), RawExplanations.class);
+        if (raw == null || raw.explanations == null) throw new JsonParseException("JSON has no 'explanations' list");
+        Map<Integer, String> result = new LinkedHashMap<>();
+        for (RawGrade e : raw.explanations) {
+            if (e != null && e.id != null && ids.contains(e.id) && e.feedback != null && !e.feedback.isBlank()) {
+                result.put(e.id, e.feedback.trim());
+            }
+        }
+        if (result.isEmpty()) throw new JsonParseException("no usable explanations in the reply");
+        return result;
+    }
+
+    /**
+     * Asks the LLM and parses the reply with {@code parser}; if the parser rejects it (bad JSON or nothing usable),
+     * asks once more with a firmer reminder. Throws {@link LLMException} if the second reply is unusable too.
+     */
+    private <T> T askJson(String prompt, List<String> context, Function<String, T> parser, String what) {
+        try {
+            return parser.apply(ask(prompt, context));
+        } catch (JsonParseException firstError) {
+            try {
+                return parser.apply(ask(prompt + "\n\nIMPORTANT: your previous reply was not valid. "
+                        + "Reply with the JSON object only, in the exact shape shown.", context));
+            } catch (JsonParseException secondError) {
+                throw new LLMException("The AI did not return valid " + what + " (" + secondError.getMessage() + ")");
+            }
+        }
     }
 
     /** Observer callback: remembers recent changes (newest last) for later planning. */

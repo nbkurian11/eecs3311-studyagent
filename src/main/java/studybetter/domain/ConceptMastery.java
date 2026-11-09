@@ -15,7 +15,12 @@ public class ConceptMastery {
 
 
     public void record(boolean correct) {
-        double value = correct ? 1.0 : 0.0;
+        record(correct ? 1.0 : 0.0);
+    }
+
+    /** Records one result worth {@code value} (0 = wrong, 1 = right, in between = partial credit). */
+    public void record(double value) {
+        value = Math.max(0, Math.min(1, value));
         level = (attempts == 0) ? value : (1 - RECENT_WEIGHT) * level + RECENT_WEIGHT * value;
         attempts++;
     }

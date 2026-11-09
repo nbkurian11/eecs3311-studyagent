@@ -2,6 +2,7 @@ package studybetter.ui;
 
 import studybetter.controller.AgentController;
 import studybetter.controller.AgentController.DeadlineReport;
+import studybetter.controller.AgentController.PastTestResult;
 import studybetter.controller.AgentController.PracticeResult;
 import studybetter.controller.AgentController.SyllabusResult;
 import studybetter.controller.AgentController.SyllabusSaveResult;
@@ -10,6 +11,7 @@ import studybetter.domain.AssessmentItem;
 import studybetter.domain.ConceptMastery;
 import studybetter.domain.Course;
 import studybetter.domain.Explanation;
+import studybetter.domain.GradeResult;
 import studybetter.domain.Material;
 import studybetter.domain.MockExam;
 import studybetter.domain.PracticeAssessment;
@@ -93,6 +95,8 @@ public class CLIApp {
             case "quiz" -> quiz();
             case "mock-exam" -> mockExam();
             case "practices" -> practices();
+            case "grade-practice" -> gradePractice();
+            case "analyze-past-test" -> analyzePastTest();
             default -> { return false; }
         }
         return true;
@@ -121,7 +125,9 @@ public class CLIApp {
                   explain          ask the AI to explain a concept using your course materials
                   quiz             generate a practice quiz on chosen or weak topics and answer it
                   mock-exam        generate a timed mock exam weighted by syllabus topics and answer it
-                  practices        list your submitted quizzes and mock exams
+                  practices        list your submitted quizzes and mock exams with their scores
+                  grade-practice   grade a submitted quiz or mock exam (or its pending short answers)
+                  analyze-past-test  find where you lost marks on a graded past test (.txt) and update mastery
                   quit             exit""");
     }
 
@@ -504,7 +510,91 @@ public class CLIApp {
         }
         controller.saveAnswers(practice, answers);
         System.out.println("\nSubmitted: " + practice.getAnsweredCount() + " of " + questions.size()
-                + " questions answered. Your answers are saved for grading (see 'practices').");
+                + " questions answered. Grading...");
+        printGradeReport(controller.gradePractice(practice.getId()), practice.getCourseCode());
+    }
+
+    /** F08: pick a saved attempt that is ungraded or has pending short answers, and grade it. */
+    private void gradePractice() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        List<PracticeAssessment> list = controller.getPracticesToGrade(code);
+        if (list.isEmpty()) {
+            System.out.println("Nothing to grade in " + code + ". Every submitted quiz and mock exam is graded.");
+            return;
+        }
+        for (int i = 0; i < list.size(); i++) {
+            System.out.println("  " + (i + 1) + ". " + list.get(i).getSubmittedAt().toLocalDate() + "  " + list.get(i));
+        }
+        int n = (int) parseNumber(required("Pick a number: "));
+        if (n < 1 || n > list.size()) throw new IllegalArgumentException("Pick a number from 1 to " + list.size());
+        System.out.println("Grading...");
+        printGradeReport(controller.gradePractice(list.get(n - 1).getId()), code);
+    }
+
+    /** F08: extract questions and marks from a graded test, show where marks were lost, then update mastery on "y". */
+    private void analyzePastTest() {
+        String code = controller.findCourse(required("Course code: ")).getCode();
+        String path = stripQuotes(required("Path to the graded test (.txt or .md): "));
+        System.out.println("Reading the test and explaining lost marks...");
+        PastTestResult analysis = controller.analyzePastTest(code, path);
+        if (!analysis.analyzed()) {
+            System.out.println("Could not analyze the test (" + analysis.error() + "). Try again later.");
+            return;
+        }
+        GradeResult result = analysis.result();
+        printResults(result);
+        String answer = prompt("\nAre these questions and marks right? Add them to your mastery for " + code + "? (y/n): ");
+        if (answer == null || !answer.equalsIgnoreCase("y")) {
+            System.out.println("Not added to mastery.");
+            return;
+        }
+        controller.recordPastTest(result);
+        printMasteryFor(code, result);
+    }
+
+    /** Score, per-question feedback, per-topic breakdown, then the mastery of the topics involved. */
+    private void printGradeReport(GradeResult result, String code) {
+        printResults(result);
+        printMasteryFor(code, result);
+    }
+
+    private void printResults(GradeResult result) {
+        System.out.println("\n" + (result.getTitle() == null ? "Result" : result.getTitle()));
+        System.out.println("Score: " + result);
+        List<GradeResult.QuestionResult> rows = result.getResults();
+        for (int i = 0; i < rows.size(); i++) {
+            GradeResult.QuestionResult r = rows.get(i);
+            String verdict = r.pending() ? "PENDING" : r.correct() ? "Correct" : r.points() > 0 ? "Partly correct" : "Wrong";
+            String marks = r.pending() ? "" : " (" + GradeResult.formatPoints(r.points()) + "/"
+                    + GradeResult.formatPoints(r.maxPoints()) + ")";
+            System.out.println("\n" + (i + 1) + ". [" + (r.topic() == null ? "no topic" : r.topic()) + "] "
+                    + verdict + marks);
+            if (r.question() != null) System.out.println("   " + r.question());
+            if (r.studentAnswer() != null) {
+                System.out.println("   Your answer: " + (r.studentAnswer().isBlank() ? "(blank)" : r.studentAnswer()));
+            }
+            if (r.correctAnswer() != null && !r.correct()) System.out.println("   Correct answer: " + r.correctAnswer());
+            if (r.feedback() != null && !r.feedback().isBlank()) System.out.println("   " + r.feedback());
+        }
+        if (!result.getTopicScores().isEmpty()) {
+            System.out.println("\nBy topic:");
+            for (GradeResult.TopicScore t : result.getTopicScores()) {
+                System.out.printf("  %-30s %s/%s (%.0f%%)%n", t.topic(), GradeResult.formatPoints(t.points()),
+                        GradeResult.formatPoints(t.maxPoints()), t.percent());
+            }
+        }
+        result.getWarnings().forEach(w -> System.out.println("  ! " + w));
+    }
+
+    /** Current mastery of the topics in this result (graded ones only). */
+    private void printMasteryFor(String code, GradeResult result) {
+        List<String> topics = result.getTopicScores().stream().map(GradeResult.TopicScore::topic).toList();
+        List<ConceptMastery> updated = controller.getMastery(code).stream()
+                .filter(m -> topics.stream().anyMatch(t -> t.equalsIgnoreCase(m.getTopic())))
+                .toList();
+        if (updated.isEmpty()) return;
+        System.out.println("\nUpdated mastery:");
+        updated.forEach(m -> System.out.println("  " + m));
     }
 
     /** Asks until the answer is valid. Returns "" for a skip, or null at end of input. */
