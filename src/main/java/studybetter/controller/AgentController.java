@@ -28,6 +28,7 @@ import studybetter.service.DeadlineTracker.Deadline;
 import studybetter.service.GradeBook;
 import studybetter.service.MasteryTracker;
 import studybetter.service.PracticeManager;
+import studybetter.service.ProgressDashboard;
 import studybetter.service.SessionLogger;
 
 import java.nio.file.Path;
@@ -39,8 +40,8 @@ import java.util.OptionalDouble;
 
 /**
  * Facade pattern: the single entry point the CLI and GUI use. It hides the services
- * (CourseManager, DeadlineTracker, GradeBook, MasteryTracker, SessionLogger, PracticeManager) and the
- * {@link StudyAgent},
+ * (CourseManager, DeadlineTracker, GradeBook, MasteryTracker, SessionLogger, PracticeManager,
+ * ProgressDashboard) and the {@link StudyAgent},
  * and turns LLM failures into graceful results instead of crashes.
  */
 public class AgentController {
@@ -78,6 +79,7 @@ public class AgentController {
     private final SessionLogger sessionLogger;
     private final PracticeManager practiceManager = new PracticeManager();
     private final StudyAgent agent;
+    private final ProgressDashboard dashboard;
     private final boolean usingRealLlm;
 
     /** Uses Gemini when GEMINI_API_KEY is set, otherwise the offline mock. */
@@ -106,6 +108,8 @@ public class AgentController {
         tools.register(new DeadlineTool(deadlineTracker));
         this.agent = new StudyAgent(llm, tools);
         addObserver(agent);
+        this.dashboard = new ProgressDashboard(courseManager, deadlineTracker, gradeBook, masteryTracker, sessionLogger);
+        addObserver(dashboard);
     }
 
     /** False when running on the offline mock (no API key), so the UI can warn the user. */
@@ -387,9 +391,32 @@ public class AgentController {
         return sessionLogger.totalMinutes(findCourse(courseCode).getId());
     }
 
+    /** Finished sessions for one course, or for every course when {@code courseCode} is null. */
+    public List<StudySession> getSessions(String courseCode) {
+        return sessionLogger.getSessions(courseCode == null ? null : findCourse(courseCode).getId());
+    }
+
+    /** F11: the dashboard numbers as of the last data change. */
+    public ProgressDashboard.Stats getDashboard() {
+        return dashboard.getStats();
+    }
+
+    /** F11: recomputes the dashboard now (e.g. when the tab is opened, so new courses are included too). */
+    public ProgressDashboard.Stats refreshDashboard() {
+        dashboard.refresh("opened");
+        return dashboard.getStats();
+    }
+
+    /** Lets the GUI's Dashboard tab hear when the dashboard has recomputed its numbers (Observer). */
+    public void addDashboardObserver(DataObserver observer) {
+        dashboard.attach(observer);
+    }
+
+    /** Attaches an observer to every service that reports data changes (Observer pattern). */
     public void addObserver(DataObserver observer) {
         gradeBook.attach(observer);
         masteryTracker.attach(observer);
         sessionLogger.attach(observer);
+        deadlineTracker.attach(observer);
     }
 }

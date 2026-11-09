@@ -2,6 +2,7 @@ package studybetter.service;
 
 import studybetter.domain.AssessmentItem;
 import studybetter.domain.Course;
+import studybetter.observer.Subject;
 import studybetter.persistence.DataStore;
 
 import java.time.LocalDate;
@@ -10,7 +11,11 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.function.Supplier;
 
-public class DeadlineTracker {
+/**
+ * F03: sorts every course's assessments into upcoming, due soon, overdue, undated and completed.
+ * Extends {@link Subject} (Observer pattern) so the dashboard refreshes when an item is marked complete.
+ */
+public class DeadlineTracker extends Subject {
 
     /** An assessment together with the course it belongs to. */
     public record Deadline(Course course, AssessmentItem item) {
@@ -80,6 +85,16 @@ public class DeadlineTracker {
                 .orElseThrow(() -> new IllegalArgumentException("No assessment with id " + itemId));
         d.item().setCompleted(true);
         DataStore.getInstance().saveAll();
+        notifyObservers("deadline");
+    }
+
+    /** Completed items (graded or marked complete), most recent due date first; undated ones last. */
+    public List<Deadline> getCompleted(String courseCodeFilter) {
+        return all(courseCodeFilter).stream()
+                .filter(d -> d.item().isCompleted())
+                .sorted(Comparator.comparing((Deadline d) -> d.item().getDueDate(),
+                        Comparator.nullsLast(Comparator.reverseOrder())))
+                .toList();
     }
 
     private List<Deadline> all(String courseCodeFilter) {
