@@ -11,7 +11,11 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JScrollPane;
 import javax.swing.JTextArea;
+import javax.swing.JTextPane;
 import javax.swing.SwingUtilities;
+import javax.swing.text.BadLocationException;
+import javax.swing.text.SimpleAttributeSet;
+import javax.swing.text.StyleConstants;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Font;
@@ -23,8 +27,8 @@ import java.util.List;
  * Dashboard tab (F11). Observer pattern: this panel is registered with the {@code ProgressDashboard} (through
  * {@link AgentController#addDashboardObserver}); when a grade, session, mastery update or completed deadline
  * changes the data, the dashboard recomputes its stats and this panel redraws itself, even while another tab
- * is open. Shows study minutes and current grade per course, the weakest topics, and upcoming / completed
- * deadlines, with bar charts drawn by {@link BarChart}.
+ * is open. Shows study minutes and current grade per course, the weakest topics, and overdue (in red) /
+ * upcoming / completed deadlines, with bar charts drawn by {@link BarChart}.
  */
 class DashboardPanel extends TabPanel implements DataObserver {
 
@@ -37,7 +41,7 @@ class DashboardPanel extends TabPanel implements DataObserver {
     private final BarChart minutesChart = new BarChart("Study minutes per course");
     private final BarChart gradeChart = new BarChart("Current grade per course");
     private final BarChart weakChart = new BarChart("Weakest topics (mastery)");
-    private final JTextArea deadlines = textArea();
+    private final JTextPane deadlines = deadlinesPane();
 
     DashboardPanel(AgentController controller, MainWindow window) {
         super(controller, window);
@@ -96,14 +100,34 @@ class DashboardPanel extends TabPanel implements DataObserver {
         }
         weakChart.setData(weak, 100, "No quizzes graded yet");
 
-        StringBuilder sb = new StringBuilder("Upcoming:\n");
-        if (stats.upcoming().isEmpty()) sb.append("  (none)\n");
-        for (Deadline d : stats.upcoming()) sb.append("  ").append(line(d)).append('\n');
-        sb.append("\nCompleted:\n");
-        if (stats.completed().isEmpty()) sb.append("  (none)\n");
-        for (Deadline d : stats.completed()) sb.append("  ").append(line(d)).append('\n');
-        deadlines.setText(sb.toString());
+        deadlines.setText("");
+        if (!stats.overdue().isEmpty()) appendSection("Overdue", stats.overdue(), WEAK);
+        appendSection("Upcoming", stats.upcoming(), null);
+        appendSection("Completed", stats.completed(), null);
         deadlines.setCaretPosition(0);
+    }
+
+    /** Adds a heading and one line per deadline to the deadlines box, in {@code color} (null = normal text). */
+    private void appendSection(String heading, List<Deadline> items, Color color) {
+        StringBuilder sb = new StringBuilder(deadlines.getDocument().getLength() == 0 ? "" : "\n");
+        sb.append(heading).append(":\n");
+        if (items.isEmpty()) sb.append("  (none)\n");
+        for (Deadline d : items) sb.append("  ").append(line(d)).append('\n');
+        SimpleAttributeSet style = new SimpleAttributeSet();
+        if (color != null) StyleConstants.setForeground(style, color);
+        try {
+            deadlines.getDocument().insertString(deadlines.getDocument().getLength(), sb.toString(), style);
+        } catch (BadLocationException e) {
+            throw new IllegalStateException(e);   // cannot happen: we always insert at the end
+        }
+    }
+
+    /** Read-only text pane (unlike a JTextArea it can colour one section, e.g. overdue in red). */
+    private static JTextPane deadlinesPane() {
+        JTextPane pane = new JTextPane();
+        pane.setEditable(false);
+        pane.setFont(new JTextArea().getFont());   // same look as the other text boxes
+        return pane;
     }
 
     private static String line(Deadline d) {

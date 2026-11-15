@@ -35,7 +35,7 @@ public class ProgressDashboard extends Subject implements DataObserver {
 
     /** Everything the dashboard shows, computed at {@code updatedAt} because of {@code lastEvent}. */
     public record Stats(List<CourseStats> courses, List<TopicStats> weakestTopics,
-                        List<Deadline> upcoming, List<Deadline> completed,
+                        List<Deadline> overdue, List<Deadline> upcoming, List<Deadline> completed,
                         int totalStudyMinutes, String lastEvent, LocalDateTime updatedAt) {}
 
     private final CourseManager courseManager;
@@ -82,6 +82,7 @@ public class ProgressDashboard extends Subject implements DataObserver {
         topics.sort(Comparator.comparingDouble(TopicStats::level));
         stats = new Stats(courses,
                 topics.stream().limit(WEAKEST_TOPICS_SHOWN).toList(),
+                deadlineTracker.getOverdue().stream().limit(DEADLINES_SHOWN).toList(),
                 deadlineTracker.getUpcoming(null).stream().limit(DEADLINES_SHOWN).toList(),
                 deadlineTracker.getCompleted(null).stream().limit(DEADLINES_SHOWN).toList(),
                 sessionLogger.totalMinutes(null),
