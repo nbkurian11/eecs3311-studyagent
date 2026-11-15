@@ -93,7 +93,8 @@ public class StudyAgent implements DataObserver, QuestionGenerator {
             try {
                 return new Explanation(question, GENERAL_LABEL + "\n\n" + llm.generate(prompt).trim(), List.of(), false);
             } catch (LLMException e) {
-                throw new IllegalStateException("AI request failed: " + e.getMessage()
+                String reason = e.getMessage().replaceAll("\\.+$", "");
+                throw new IllegalStateException("AI request failed: " + reason
                         + ". None of your materials for " + course.getCode() + " match this question either.");
             }
         }

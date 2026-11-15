@@ -10,6 +10,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Retrieval tool: keyword search over a course's uploaded materials.
@@ -57,19 +59,24 @@ public class MaterialSearchTool implements Tool {
         return sb.toString().trim();
     }
 
-    /** Returns up to {@code limit} passages with at least one keyword match, best first. */
+    /**
+     * Returns up to {@code limit} matching passages, best first. A passage must contain at least two different
+     * keywords (or the only keyword, for a one-keyword question) so a single shared word does not count.
+     */
     public List<Passage> search(String courseId, String question, int limit) {
         Course course = courseManager.getCourse(courseId);
         Set<String> keywords = keywords(question);
         if (keywords.isEmpty()) return List.of();
 
+        // a passage sharing only one common word with a longer question (e.g. "work") is not really about it
+        int minDistinct = Math.min(2, keywords.size());
         List<Passage> matches = new ArrayList<>();
         for (Material m : course.getMaterials()) {
             List<String> chunks = splitIntoPassages(m.getText());
             if (m.getSummary() != null && !m.isSummaryPending()) chunks.add(m.getSummary());
             for (String chunk : chunks) {
-                int score = score(chunk, keywords);
-                if (score > 0) matches.add(new Passage(m.getTitle(), chunk, score));
+                if (distinctMatches(chunk, keywords) < minDistinct) continue;
+                matches.add(new Passage(m.getTitle(), chunk, score(chunk, keywords)));
             }
         }
         return matches.stream()
@@ -95,11 +102,24 @@ public class MaterialSearchTool implements Tool {
         String lower = passage.toLowerCase(Locale.ROOT);
         int score = 0;
         for (String k : keywords) {
-            int count = 0;
-            for (int i = lower.indexOf(k); i >= 0; i = lower.indexOf(k, i + k.length())) count++;
+            int count = occurrences(lower, k);
             if (count > 0) score += 10 + (count - 1);
         }
         return score;
+    }
+
+    /** How many different keywords appear in the passage. */
+    private static int distinctMatches(String passage, Set<String> keywords) {
+        String lower = passage.toLowerCase(Locale.ROOT);
+        return (int) keywords.stream().filter(k -> occurrences(lower, k) > 0).count();
+    }
+
+    /** Matches at the start of a word only: "observer" matches "observers", but "red" does not match "credit". */
+    private static int occurrences(String lowerText, String keyword) {
+        Matcher m = Pattern.compile("\\b" + Pattern.quote(keyword)).matcher(lowerText);
+        int count = 0;
+        while (m.find()) count++;
+        return count;
     }
 
     /** Splits on blank lines (paragraphs); long paragraphs are cut into pieces of about MAX_PASSAGE_CHARS. */
