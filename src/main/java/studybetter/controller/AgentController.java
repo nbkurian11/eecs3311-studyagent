@@ -349,9 +349,9 @@ public class AgentController {
     public DeadlineReport getDeadlines(String courseCodeFilter) {
         return new DeadlineReport(
                 deadlineTracker.getUpcoming(courseCodeFilter),
-                deadlineTracker.getDueSoon(),
-                deadlineTracker.getOverdue(),
-                deadlineTracker.getUndated());
+                deadlineTracker.getDueSoon(courseCodeFilter),
+                deadlineTracker.getOverdue(courseCodeFilter),
+                deadlineTracker.getUndated(courseCodeFilter));
     }
 
     public void markComplete(String itemId) {

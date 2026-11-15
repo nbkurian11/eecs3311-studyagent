@@ -21,8 +21,8 @@ public class DeadlineTracker extends Subject {
     public record Deadline(Course course, AssessmentItem item) {
         @Override
         public String toString() {
-            String due = item.getDueDate() == null ? "No date" : item.getDueDate().toString();
-            return course.getCode() + " | " + item.getTitle() + " | due " + due
+            String due = item.getDueDate() == null ? "no due date" : "due " + item.getDueDate();
+            return course.getCode() + " | " + item.getTitle() + " | " + due
                     + " | " + item.getWeight() + "%" + (item.isCompleted() ? " | done" : "");
         }
     }
@@ -54,26 +54,41 @@ public class DeadlineTracker extends Subject {
                 .toList();
     }
 
-    /** Not completed and the due date has passed. */
+    /** Not completed and the due date has passed, for every course. */
     public List<Deadline> getOverdue() {
+        return getOverdue(null);
+    }
+
+    /** Not completed and the due date has passed. Optional course code filter (null = all courses). */
+    public List<Deadline> getOverdue(String courseCodeFilter) {
         LocalDate now = today.get();
-        return all(null).stream()
+        return all(courseCodeFilter).stream()
                 .filter(d -> d.item().isOverdue(now))
                 .sorted(Comparator.comparing(d -> d.item().getDueDate()))
                 .toList();
     }
 
-    /** Upcoming items due within dueSoonDays. Used for alerts. */
+    /** Upcoming items due within dueSoonDays, for every course. Used for alerts. */
     public List<Deadline> getDueSoon() {
+        return getDueSoon(null);
+    }
+
+    /** Upcoming items due within dueSoonDays. Optional course code filter (null = all courses). */
+    public List<Deadline> getDueSoon(String courseCodeFilter) {
         LocalDate limit = today.get().plusDays(dueSoonDays);
-        return getUpcoming(null).stream()
+        return getUpcoming(courseCodeFilter).stream()
                 .filter(d -> !d.item().getDueDate().isAfter(limit))
                 .toList();
     }
 
-    /** Items imported without a due date. */
+    /** Items imported without a due date, for every course. */
     public List<Deadline> getUndated() {
-        return all(null).stream()
+        return getUndated(null);
+    }
+
+    /** Items imported without a due date. Optional course code filter (null = all courses). */
+    public List<Deadline> getUndated(String courseCodeFilter) {
+        return all(courseCodeFilter).stream()
                 .filter(d -> d.item().getDueDate() == null && !d.item().isCompleted())
                 .toList();
     }
