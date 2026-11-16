@@ -1,0 +1,3 @@
+EECS 3311 Fall 2026 - Grading
+Labs 20%, Midterm (Oct 26) 20%, Project Stage 2 (Nov 10) 15%, Project Stage 3 (Dec 1) 15%, Final exam 30%
+Week 1: UML, Week 2: Class diagrams, Week 5: Creational patterns, Week 7: Structural patterns, Week 9: Behavioral patterns

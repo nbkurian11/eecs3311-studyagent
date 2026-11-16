@@ -1,0 +1,7 @@
+   Observer pattern: a Subject keeps a list of Observers and notifies them when its state changes.
+   Observers implement an update method, so the subject does not need to know their concrete classes.
+   This decouples the subject from the objects that react to it.
+   Example: a progress dashboard refreshes automatically when new grades are saved.
+
+   Singleton pattern: ensures a class has only one instance and provides a global access point.
+   It uses a private constructor and a static getInstance method.

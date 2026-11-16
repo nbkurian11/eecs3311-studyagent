@@ -13,3 +13,5 @@ out/
 
 # Local app data
 data/
+data-old/
+data-*/
