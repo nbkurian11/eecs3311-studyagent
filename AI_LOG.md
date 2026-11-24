@@ -514,3 +514,17 @@ Full results table, bug details and notes: [docs/verification.md](docs/verificat
   version, and revoked the key in Google AI Studio and created a new one.
 - Claude generated the updated Stage 2 class diagram for UMLet from the final code, and helped draft and review
   the Stage 2 report.
+
+---
+
+## 2026-11-24: CLI dashboard command (F11)
+
+**Tool:** Claude Code (Claude Opus 5.5)
+
+- I asked Claude Code to add a `dashboard` command to the CLI so every feature is reachable from the CLI.
+  It prints the existing `ProgressDashboard.Stats`: total study minutes, minutes and current grade per course
+  with a `#` bar, weakest topics, overdue/upcoming/completed deadlines and the last update time.
+- While testing in a scratch folder with the offline mock, Claude Code found that `getDashboard()` returned a
+  stale snapshot after adding a course or assessment (those do not notify the dashboard). The command uses
+  `refreshDashboard()` instead, the same way the GUI's Dashboard tab does.
+- Added `dashboard` to the help text and a CLI command table to the README.

@@ -24,10 +24,14 @@ import studybetter.domain.StudyTask;
 import studybetter.domain.SyllabusDraft;
 import studybetter.domain.Topic;
 import studybetter.service.DeadlineTracker.Deadline;
+import studybetter.service.ProgressDashboard.CourseStats;
+import studybetter.service.ProgressDashboard.Stats;
+import studybetter.service.ProgressDashboard.TopicStats;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.TextStyle;
 import java.util.ArrayList;
@@ -103,6 +107,7 @@ public class CLIApp {
             case "grade-practice" -> gradePractice();
             case "analyze-past-test" -> analyzePastTest();
             case "plan" -> plan();
+            case "dashboard" -> dashboard();
             default -> { return false; }
         }
         return true;
@@ -135,7 +140,56 @@ public class CLIApp {
                   grade-practice   grade a submitted quiz or mock exam (or its pending short answers)
                   analyze-past-test  find where you lost marks on a graded past test (.txt) and update mastery
                   plan             build a one-week study plan from deadlines, weak topics, grades and sessions
+                  dashboard        show study minutes, current grades, weakest topics and deadlines
                   quit / exit      leave StudyBetter""");
+    }
+
+    // ---------- dashboard ----------
+
+    /** Longest text bar in the dashboard's study-minutes chart. */
+    private static final int BAR_WIDTH = 30;
+
+    /**
+     * F11: prints the ProgressDashboard's stats (the same Stats the GUI's Dashboard tab shows). Like the GUI tab,
+     * it refreshes first, because adding a course or assessment does not notify the dashboard.
+     */
+    private void dashboard() {
+        Stats s = controller.refreshDashboard();
+        System.out.println("Progress dashboard");
+        System.out.println("Total study time: " + s.totalStudyMinutes() + " min");
+
+        System.out.println("\nCourses:");
+        if (s.courses().isEmpty()) System.out.println("  (none)");
+        int maxMinutes = s.courses().stream().mapToInt(CourseStats::studyMinutes).max().orElse(0);
+        for (CourseStats c : s.courses()) {
+            String grade = c.currentGrade() == null ? "no grades yet" : String.format("%.1f%%", c.currentGrade());
+            int bar = maxMinutes == 0 ? 0 : Math.round((float) c.studyMinutes() * BAR_WIDTH / maxMinutes);
+            System.out.printf("  %-10s %5d min  grade: %-13s %s%n", c.courseCode(), c.studyMinutes(), grade,
+                    "#".repeat(bar));
+        }
+
+        System.out.println("\nWeakest topics:");
+        if (s.weakestTopics().isEmpty()) System.out.println("  (none)");
+        for (TopicStats t : s.weakestTopics()) {
+            System.out.printf("  %s | %s | %.2f (%s)%n", t.courseCode(), t.topic(), t.level(), t.label());
+        }
+
+        printDashboardDeadlines("Overdue", s.overdue());
+        printDashboardDeadlines("Upcoming", s.upcoming());
+        printDashboardDeadlines("Completed", s.completed());
+
+        System.out.println("\nLast updated: " + s.updatedAt().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                + " (" + s.lastEvent() + ")");
+    }
+
+    private void printDashboardDeadlines(String heading, List<Deadline> deadlines) {
+        System.out.println("\n" + heading + " deadlines:");
+        if (deadlines.isEmpty()) System.out.println("  (none)");
+        for (Deadline d : deadlines) {
+            String due = d.item().getDueDate() == null ? "no due date" : d.item().getDueDate().toString();
+            System.out.printf("  %s | %s | %s | %.1f%%%n", d.course().getCode(), d.item().getTitle(), due,
+                    d.item().getWeight());
+        }
     }
 
     // ---------- study plan (agent) ----------

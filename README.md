@@ -94,6 +94,17 @@ mvn compile exec:java -Dexec.args="--cli"   # CLI
 The GUI has one tab per area: **Courses, Deadlines, Grades, Learn, Practice, Mastery, Sessions, Planner** and
 **Dashboard**. Slow AI calls run in the background, with "Working..." shown in the status bar.
 
+The CLI covers every feature with these commands:
+
+| Area | Commands |
+|---|---|
+| Courses and materials (F01, F02) | `courses`, `add-course`, `delete-course`, `add-item`, `import-syllabus`, `topics`, `upload-material`, `materials`, `summarize` |
+| Deadlines and grades (F03, F04) | `deadlines`, `complete`, `grade`, `grade-status` |
+| Learning and practice (F05 to F08) | `explain`, `quiz`, `mock-exam`, `practices`, `grade-practice`, `analyze-past-test` |
+| Progress (F09 to F11) | `mastery`, `start`, `end`, `dashboard` |
+| Planning (F12) | `plan` |
+| Other | `help`, `quit` / `exit` |
+
 ## Example CLI session
 
 Type `help` for all commands, and `quit` or `exit` to leave. This session ran on the offline mock.
