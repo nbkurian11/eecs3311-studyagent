@@ -28,6 +28,8 @@ import studybetter.service.ProgressDashboard.CourseStats;
 import studybetter.service.ProgressDashboard.Stats;
 import studybetter.service.ProgressDashboard.TopicStats;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -46,15 +48,26 @@ import java.util.Scanner;
  * Reads one command per line, asks for each input with a prompt, and calls only
  * {@link AgentController} (the Facade), so the CLI never touches services or the DataStore directly.
  * Validation errors from the services are caught here and printed as "Error: ...".
+ * Input comes from the keyboard, or from a script file ({@code -input FILE}); with a script, each line is
+ * echoed after its prompt and the CLI stops at the end of the file.
  */
 public class CLIApp {
 
     private final AgentController controller;
     private final Scanner in;
+    /** True when reading a script file: each line read is printed after its prompt, like a typed session. */
+    private final boolean echo;
 
+    /** Interactive CLI reading from the keyboard. */
     public CLIApp(AgentController controller) {
+        this(controller, System.in, false);
+    }
+
+    /** CLI reading its commands and answers from {@code input}; {@code echo} prints each line read. */
+    public CLIApp(AgentController controller, InputStream input, boolean echo) {
         this.controller = controller;
-        this.in = new Scanner(System.in);
+        this.in = new Scanner(input, StandardCharsets.UTF_8);
+        this.echo = echo;
     }
 
     /** Main loop: read a command, run it, repeat until "quit"/"exit" or end of input. */
@@ -785,8 +798,13 @@ public class CLIApp {
     /** Prints a prompt and returns the trimmed line, or null at end of input. */
     private String prompt(String message) {
         System.out.print(message);
-        if (!in.hasNextLine()) return null;
-        return in.nextLine().trim();
+        if (!in.hasNextLine()) {
+            if (echo) System.out.println();
+            return null;
+        }
+        String line = in.nextLine().trim();
+        if (echo) System.out.println(line);
+        return line;
     }
 
     /** Like prompt, but the answer cannot be blank. */

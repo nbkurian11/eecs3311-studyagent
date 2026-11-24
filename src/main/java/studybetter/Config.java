@@ -6,8 +6,14 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Reads settings such as GEMINI_API_KEY and GEMINI_MODEL. Lookup order: runtime overrides (set from command-line
+ * options such as {@code --model} or {@code --mock}), then environment variables, then the {@code .env} file in
+ * the current folder.
+ */
 public final class Config {
     private static final Map<String, String> values = new HashMap<>();
+    private static final Map<String, String> overrides = new HashMap<>();
 
     static {
         Path env = Path.of(".env");
@@ -27,7 +33,13 @@ public final class Config {
 
     private Config() {}
 
+    /** Sets a value for this run only; it wins over environment variables and .env. */
+    public static void override(String key, String value) {
+        overrides.put(key, value);
+    }
+
     public static String get(String key, String defaultValue) {
+        if (overrides.containsKey(key)) return overrides.get(key);
         String fromEnv = System.getenv(key);
         if (fromEnv != null && !fromEnv.isBlank()) return fromEnv;
         return values.getOrDefault(key, defaultValue);

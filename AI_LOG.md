@@ -528,3 +528,19 @@ Full results table, bug details and notes: [docs/verification.md](docs/verificat
   stale snapshot after adding a course or assessment (those do not notify the dashboard). The command uses
   `refreshDashboard()` instead, the same way the GUI's Dashboard tab does.
 - Added `dashboard` to the help text and a CLI command table to the README.
+
+---
+
+## 2026-11-24: Standalone CLI jar (`java -jar Agent.jar -LLMAPI -input task.txt`)
+
+**Tool:** Claude Code (Claude Opus 5.5)
+
+- For the professor's requirement, Claude Code added the maven-shade-plugin so `mvn clean package` builds a runnable
+  `target/Agent.jar` with Gson inside, and a `CliOptions` parser in `Main`: `--help`, `--cli`, `-input FILE`,
+  `-LLMAPI`/`--llm`, `--mock` and `--model NAME`, with exit codes 0/1/2.
+- `Config` got a runtime override map (checked before environment variables and `.env`), used for `--model` and to
+  force the mock. `CLIApp` can read from a script file: it echoes each answer after its prompt and stops at the end
+  of the file.
+- Added `samples/task.txt` (builds a study plan) and a "Standalone CLI" README section. Claude Code tested the jar
+  from scratch folders with the mock, the missing-key error, bad options, a missing input file and a run from
+  another folder, without using my `.env` or data folders.

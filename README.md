@@ -105,6 +105,41 @@ The CLI covers every feature with these commands:
 | Planning (F12) | `plan` |
 | Other | `help`, `quit` / `exit` |
 
+## Standalone CLI (runnable jar)
+
+Build the jar (Gson is bundled inside):
+
+```bash
+mvn clean package          # creates target/Agent.jar
+```
+
+Run the agent on a task file:
+
+```bash
+java -jar target/Agent.jar -LLMAPI -input samples/task.txt   # with the Gemini API
+java -jar target/Agent.jar --mock -input samples/task.txt    # offline, no API key needed
+```
+
+`samples/task.txt` is a script of CLI input, one command or answer per line. It builds the F12 study plan
+(`plan`, then `2` hours per day, then `quit`), using the courses, deadlines, grades and sessions already saved
+in `./data`, so add some data first (GUI or CLI) to get a useful plan. With `-input`, each answer is printed after its
+prompt so the output reads like a typed session, and the run ends at the end of the file even without `quit`.
+
+| Option | Meaning |
+|---|---|
+| `-h`, `--help` | Print the usage and options, then exit. |
+| `--cli` | Start the interactive CLI (the GUI is the default). |
+| `-input FILE`, `--input FILE` | Run CLI commands from FILE, then exit. Implies `--cli`. |
+| `-LLMAPI`, `--llm` | Use the Gemini API. Exits with an error if `GEMINI_API_KEY` is not set. |
+| `--mock` | Use the offline mock LLM (no API calls). |
+| `--model NAME` | Use this Gemini model for this run (overrides `GEMINI_MODEL`). |
+
+Single- and double-dash forms both work. Without `-LLMAPI` or `--mock`, Gemini is used when a key is set,
+otherwise the mock. Exit codes: `0` ok, `1` missing input file or API key, `2` bad option.
+
+`.env` and `data/` are read from the **current folder**, so run the jar from the project folder, or set
+`GEMINI_API_KEY` as an environment variable when running it from somewhere else (a new `data/` is then created there).
+
 ## Example CLI session
 
 Type `help` for all commands, and `quit` or `exit` to leave. This session ran on the offline mock.
